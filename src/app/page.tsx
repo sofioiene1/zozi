@@ -1320,6 +1320,8 @@ export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const titleCanvasRef = useRef<HTMLCanvasElement>(null);
   const [started, setStarted] = useState(false);
+  const [cheatPaletteOpen, setCheatPaletteOpen] = useState(false);
+  const [cheatIndex, setCheatIndex] = useState(0);
   const audioRef = useRef<ZenAudio | null>(null);
 
   // Game state refs
@@ -1389,10 +1391,66 @@ export default function Game() {
     await audioRef.current.start();
   }, [started]);
 
+  const CHEATS = [
+    {
+      label: "teleport to golden bamboo",
+      color: "#ffd700",
+      action: () => {
+        playerRef.current.x = GOLDEN_BAMBOO_POS.x + 0.5;
+        playerRef.current.y = GOLDEN_BAMBOO_POS.y + 1.5;
+        insideHouseRef.current = false;
+      },
+    },
+    {
+      label: "teleport to zozi's house",
+      color: "#c06080",
+      action: () => {
+        playerRef.current.x = 87.5;
+        playerRef.current.y = 69.5;
+        insideHouseRef.current = false;
+      },
+    },
+  ];
+
   // Input handling + keyboard start
   useEffect(() => {
     const moveKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "w", "a", "s", "d"]);
     const onKeyDown = (e: KeyboardEvent) => {
+      // Cmd+K / Ctrl+K: toggle cheat palette
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setCheatPaletteOpen((prev) => {
+          if (!prev) setCheatIndex(0);
+          return !prev;
+        });
+        return;
+      }
+      // Escape: close cheat palette
+      if (e.key === "Escape") {
+        setCheatPaletteOpen(false);
+        return;
+      }
+      if (cheatPaletteOpen) {
+        // Arrow keys: navigate cheats
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setCheatIndex((i) => (i - 1 + CHEATS.length) % CHEATS.length);
+          return;
+        }
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setCheatIndex((i) => (i + 1) % CHEATS.length);
+          return;
+        }
+        // Enter: execute selected cheat
+        if (e.key === "Enter") {
+          e.preventDefault();
+          CHEATS[cheatIndex].action();
+          setCheatPaletteOpen(false);
+          return;
+        }
+        return;
+      }
       keysRef.current.add(e.key);
       // Start game on movement key press
       if (moveKeys.has(e.key) && !started) {
@@ -1439,7 +1497,7 @@ export default function Game() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [started, startGame, getTileAt]);
+  }, [started, startGame, getTileAt, cheatPaletteOpen, cheatIndex, CHEATS]);
 
   // Title screen canvas animation
   useEffect(() => {
@@ -1780,5 +1838,65 @@ export default function Game() {
     );
   }
 
-  return <canvas ref={canvasRef} className="block w-screen h-screen" />;
+  return (
+    <>
+      <canvas ref={canvasRef} className="block w-screen h-screen" />
+      {cheatPaletteOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            paddingTop: "20vh",
+            zIndex: 100,
+          }}
+          onClick={() => setCheatPaletteOpen(false)}
+        >
+          <div
+            style={{
+              background: "#1a1a2e",
+              border: "1px solid #333",
+              borderRadius: 8,
+              padding: 8,
+              minWidth: 260,
+              fontFamily: "monospace",
+              fontSize: 13,
+              color: "#e0d8c8",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: "4px 8px", opacity: 0.5, fontSize: 11 }}>cheats</div>
+            {CHEATS.map((cheat, i) => (
+              <button
+                key={i}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 12px",
+                  background: i === cheatIndex ? "#2a2a4e" : "transparent",
+                  border: "none",
+                  color: cheat.color,
+                  fontFamily: "monospace",
+                  fontSize: 13,
+                  cursor: "pointer",
+                  borderRadius: 4,
+                }}
+                onMouseEnter={() => setCheatIndex(i)}
+                onClick={() => {
+                  cheat.action();
+                  setCheatPaletteOpen(false);
+                }}
+              >
+                {cheat.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
