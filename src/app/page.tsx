@@ -7,8 +7,7 @@ import { useEffect, useRef, useCallback, useState } from "react";
 const TILE = 16;
 const SCALE = 3;
 const SCALED_TILE = TILE * SCALE;
-const CHUNK_SIZE = 16; // tiles per chunk
-const RENDER_DISTANCE = 3; // chunks around player
+const CHUNK_SIZE = 16;
 
 // ─── Color Palettes ─────────────────────────────────────────────────────────
 
@@ -22,12 +21,6 @@ const COLORS = {
   water: "#3d6b8e",
   waterLight: "#4a7fa6",
   waterDark: "#2d5a7a",
-  wallBase: "#d4c4a0",
-  wallDark: "#b8a888",
-  wallLight: "#e8dcc0",
-  roofDark: "#6b2d2d",
-  roofMid: "#8b3d3d",
-  roofLight: "#a04848",
   wood: "#8b6f4e",
   woodDark: "#6b5238",
   woodLight: "#a68a60",
@@ -55,6 +48,19 @@ const COLORS = {
   flowerWhite: "#e8e0d0",
   flowerYellow: "#e0c060",
 };
+
+// ─── House Color Palettes (per-block variation) ─────────────────────────────
+
+const HOUSE_PALETTES = [
+  { wallBase: "#d4c4a0", wallDark: "#b8a888", wallLight: "#e8dcc0", roofDark: "#6b2d2d", roofMid: "#8b3d3d", roofLight: "#a04848" },
+  { wallBase: "#c8bfa0", wallDark: "#a8a080", wallLight: "#ddd8c0", roofDark: "#2d4a6b", roofMid: "#3d5a7b", roofLight: "#4a6a8b" },
+  { wallBase: "#d8cbb0", wallDark: "#bca888", wallLight: "#ede0cc", roofDark: "#4a4a2d", roofMid: "#5a5a3d", roofLight: "#6a6a48" },
+  { wallBase: "#ccc0b0", wallDark: "#b0a090", wallLight: "#e0d8c8", roofDark: "#5b2d5b", roofMid: "#7b3d6b", roofLight: "#8b487b" },
+  { wallBase: "#ddd0b8", wallDark: "#c0b098", wallLight: "#f0e8d8", roofDark: "#6b4a2d", roofMid: "#8b5a3d", roofLight: "#a06848" },
+  { wallBase: "#c0c4b8", wallDark: "#a0a898", wallLight: "#d8dcd0", roofDark: "#2d3a3a", roofMid: "#3d4a4a", roofLight: "#4a5a5a" },
+  { wallBase: "#d8c8b0", wallDark: "#c0a890", wallLight: "#f0e0c8", roofDark: "#7a2a2a", roofMid: "#9a3a3a", roofLight: "#b04848" },
+  { wallBase: "#e0d4bc", wallDark: "#c4b89c", wallLight: "#f4ead0", roofDark: "#3a2d5a", roofMid: "#4a3d6a", roofLight: "#5a487a" },
+];
 
 // ─── Seeded Random ──────────────────────────────────────────────────────────
 
@@ -94,6 +100,11 @@ const enum TileType {
   Empty,
 }
 
+// Helper: is walkable surface "stone-like"?
+function isStoneSurface(t: TileType): boolean {
+  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden;
+}
+
 // ─── World Generation ───────────────────────────────────────────────────────
 
 interface Chunk {
@@ -108,7 +119,6 @@ function generateChunk(cx: number, cy: number): Chunk {
   const solid: boolean[][] = [];
   const rng = seededRandom(hashCoord(cx, cy));
 
-  // fill with grass
   for (let y = 0; y < CHUNK_SIZE; y++) {
     tiles[y] = [];
     solid[y] = [];
@@ -118,27 +128,20 @@ function generateChunk(cx: number, cy: number): Chunk {
     }
   }
 
-  // world-space coords for this chunk's top-left
   const wx = cx * CHUNK_SIZE;
   const wy = cy * CHUNK_SIZE;
 
-  // roads: every 8 tiles in world space there's a path
+  // roads
   for (let y = 0; y < CHUNK_SIZE; y++) {
     for (let x = 0; x < CHUNK_SIZE; x++) {
       const worldX = wx + x;
       const worldY = wy + y;
-      // horizontal roads every 12 tiles, 2 tiles wide
-      if (((worldY % 12) + 12) % 12 < 2) {
-        tiles[y][x] = TileType.Path;
-      }
-      // vertical roads every 16 tiles, 2 tiles wide
-      if (((worldX % 16) + 16) % 16 < 2) {
-        tiles[y][x] = TileType.Path;
-      }
+      if (((worldY % 12) + 12) % 12 < 2) tiles[y][x] = TileType.Path;
+      if (((worldX % 16) + 16) % 16 < 2) tiles[y][x] = TileType.Path;
     }
   }
 
-  // water canals: every 48 tiles there's a 3-wide canal
+  // water canals
   for (let y = 0; y < CHUNK_SIZE; y++) {
     for (let x = 0; x < CHUNK_SIZE; x++) {
       const worldX = wx + x;
@@ -149,12 +152,10 @@ function generateChunk(cx: number, cy: number): Chunk {
         tiles[y][x] = TileType.Water;
         solid[y][x] = true;
       }
-      // bridge over canal where vertical roads cross
       if (modY >= 22 && modY <= 24 && ((worldX % 16) + 16) % 16 < 2) {
         tiles[y][x] = TileType.Bridge;
         solid[y][x] = false;
       }
-      // small ponds
       if (modX >= 38 && modX <= 40 && modY >= 8 && modY <= 10 && tiles[y][x] === TileType.Grass) {
         tiles[y][x] = TileType.Water;
         solid[y][x] = true;
@@ -162,8 +163,7 @@ function generateChunk(cx: number, cy: number): Chunk {
     }
   }
 
-  // place houses in blocks between roads
-  // blocks are 12 high (road gap) x 16 wide (road gap), houses go in the interior
+  // place structures in blocks between roads
   for (let y = 0; y < CHUNK_SIZE; y++) {
     for (let x = 0; x < CHUNK_SIZE; x++) {
       const worldX = wx + x;
@@ -171,18 +171,15 @@ function generateChunk(cx: number, cy: number): Chunk {
       const blockX = ((worldX % 16) + 16) % 16;
       const blockY = ((worldY % 12) + 12) % 12;
 
-      // skip if on road or water
       if (tiles[y][x] !== TileType.Grass) continue;
 
-      // determine block hash for variety
       const bx = Math.floor(worldX / 16);
       const by = Math.floor(worldY / 12);
       const blockRng = seededRandom(hashCoord(bx * 7 + 3, by * 13 + 7));
-      const blockType = blockRng(); // 0-1 determines what goes in this block
+      const blockType = blockRng();
 
       if (blockType < 0.55) {
         // house block
-        // house body: 4x3 area, positioned in center of block
         const houseStartX = 4;
         const houseEndX = 12;
         const houseStartY = 3;
@@ -194,14 +191,10 @@ function generateChunk(cx: number, cy: number): Chunk {
           const houseW = houseEndX - houseStartX;
           const houseH = houseEndY - houseStartY;
 
-          // roof (top 2 rows)
           if (relY < 2) {
             tiles[y][x] = TileType.HouseRoof;
             solid[y][x] = true;
-          }
-          // wall
-          else if (relY < houseH) {
-            // door in center bottom
+          } else if (relY < houseH) {
             if (relY === houseH - 1 && relX >= houseW / 2 - 1 && relX <= houseW / 2) {
               tiles[y][x] = TileType.HouseDoor;
               solid[y][x] = true;
@@ -212,12 +205,14 @@ function generateChunk(cx: number, cy: number): Chunk {
           }
         }
 
-        // lanterns at corners of house
+        // lanterns at corners of house — SOLID
         if (blockX === 3 && blockY === 4) {
           tiles[y][x] = TileType.Lantern;
+          solid[y][x] = true;
         }
         if (blockX === 12 && blockY === 4) {
           tiles[y][x] = TileType.Lantern;
+          solid[y][x] = true;
         }
 
         // fence around some houses
@@ -238,7 +233,6 @@ function generateChunk(cx: number, cy: number): Chunk {
         }
       } else if (blockType < 0.7) {
         // garden / park block
-        // cherry blossom trees
         if ((blockX === 5 || blockX === 10) && (blockY === 4 || blockY === 8)) {
           tiles[y][x] = TileType.TreeTrunk;
           solid[y][x] = true;
@@ -252,11 +246,9 @@ function generateChunk(cx: number, cy: number): Chunk {
             solid[y][x] = true;
           }
         }
-        // stone path through garden
         if (blockX >= 7 && blockX <= 8 && blockY >= 3 && blockY <= 9) {
           tiles[y][x] = TileType.Garden;
         }
-        // bushes
         if (blockX === 3 && blockY >= 3 && blockY <= 9 && blockY % 2 === 0) {
           if (tiles[y][x] === TileType.Grass) {
             tiles[y][x] = TileType.Bush;
@@ -288,16 +280,17 @@ function generateChunk(cx: number, cy: number): Chunk {
           tiles[y][x] = TileType.Torii;
           solid[y][x] = true;
         }
-        // stone path leading to torii
         if (blockX === 8 && blockY >= 3 && blockY <= 8) {
           tiles[y][x] = TileType.Garden;
         }
-        // lanterns
+        // lanterns — SOLID
         if (blockX === 6 && blockY === 6) {
           tiles[y][x] = TileType.Lantern;
+          solid[y][x] = true;
         }
         if (blockX === 10 && blockY === 6) {
           tiles[y][x] = TileType.Lantern;
+          solid[y][x] = true;
         }
       } else {
         // stone wall / ruins block
@@ -309,7 +302,6 @@ function generateChunk(cx: number, cy: number): Chunk {
           tiles[y][x] = TileType.StoneWall;
           solid[y][x] = true;
         }
-        // opening
         if (blockX >= 7 && blockX <= 9 && blockY === 9) {
           tiles[y][x] = TileType.Garden;
           solid[y][x] = false;
@@ -318,7 +310,7 @@ function generateChunk(cx: number, cy: number): Chunk {
     }
   }
 
-  // scatter some decorative elements
+  // scatter decorative bushes
   for (let y = 0; y < CHUNK_SIZE; y++) {
     for (let x = 0; x < CHUNK_SIZE; x++) {
       if (tiles[y][x] === TileType.Grass && rng() < 0.015) {
@@ -329,6 +321,15 @@ function generateChunk(cx: number, cy: number): Chunk {
   }
 
   return { cx, cy, tiles, solid };
+}
+
+// ─── House palette lookup ───────────────────────────────────────────────────
+
+function getHousePalette(worldX: number, worldY: number) {
+  const bx = Math.floor(worldX / 16);
+  const by = Math.floor(worldY / 12);
+  const idx = Math.abs(hashCoord(bx * 11 + 5, by * 17 + 3)) % HOUSE_PALETTES.length;
+  return HOUSE_PALETTES[idx];
 }
 
 // ─── Tile Rendering ─────────────────────────────────────────────────────────
@@ -350,7 +351,6 @@ function drawTile(
     case TileType.Grass: {
       ctx.fillStyle = variant === 0 ? COLORS.grass1 : variant === 1 ? COLORS.grass2 : COLORS.grass3;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // little grass blades
       const grassRng = seededRandom(hash);
       ctx.fillStyle = COLORS.grass2;
       for (let i = 0; i < 3; i++) {
@@ -358,7 +358,6 @@ function drawTile(
         const gy = Math.floor(grassRng() * 14) * s;
         ctx.fillRect(sx + gx, sy + gy, s, s * 2);
       }
-      // occasional flower
       if (variant === 0 && (hash & 15) < 2) {
         const fc = (hash & 1) === 0 ? COLORS.flowerPink : COLORS.flowerWhite;
         ctx.fillStyle = fc;
@@ -372,7 +371,6 @@ function drawTile(
     case TileType.Path: {
       ctx.fillStyle = variant < 2 ? COLORS.path1 : COLORS.path2;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // path texture
       ctx.fillStyle = COLORS.pathEdge;
       if (variant === 0) {
         ctx.fillRect(sx + 2 * s, sy + 5 * s, s * 3, s);
@@ -388,7 +386,6 @@ function drawTile(
     case TileType.Water: {
       ctx.fillStyle = COLORS.water;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // animated waves
       const wave = Math.sin(time * 0.002 + worldX * 0.5 + worldY * 0.3);
       ctx.fillStyle = COLORS.waterLight;
       const wy2 = Math.floor((wave + 1) * 3) * s;
@@ -401,23 +398,20 @@ function drawTile(
     }
 
     case TileType.HouseWall: {
-      ctx.fillStyle = COLORS.wallBase;
+      const hp = getHousePalette(worldX, worldY);
+      ctx.fillStyle = hp.wallBase;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // wooden beam detail
       ctx.fillStyle = COLORS.woodDark;
-      ctx.fillRect(sx, sy, s, SCALED_TILE); // left edge
-      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE); // right edge
-      // window
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
       if (variant < 2) {
         ctx.fillStyle = COLORS.woodDark;
         ctx.fillRect(sx + 4 * s, sy + 4 * s, s * 8, s * 6);
         ctx.fillStyle = "#2a3a4a";
         ctx.fillRect(sx + 5 * s, sy + 5 * s, s * 6, s * 4);
-        // warm light in window
         const glow = 0.5 + Math.sin(time * 0.001 + hash) * 0.2;
         ctx.fillStyle = `rgba(255, 200, 100, ${glow * 0.4})`;
         ctx.fillRect(sx + 5 * s, sy + 5 * s, s * 6, s * 4);
-        // cross bar
         ctx.fillStyle = COLORS.wood;
         ctx.fillRect(sx + 7 * s, sy + 5 * s, s * 2, s * 4);
         ctx.fillRect(sx + 5 * s, sy + 6 * s, s * 6, s);
@@ -426,14 +420,14 @@ function drawTile(
     }
 
     case TileType.HouseRoof: {
-      ctx.fillStyle = COLORS.roofDark;
+      const hp = getHousePalette(worldX, worldY);
+      ctx.fillStyle = hp.roofDark;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // roof tiles pattern
       for (let ry = 0; ry < 16; ry += 3) {
         for (let rx = (ry % 6 === 0 ? 0 : 3); rx < 16; rx += 6) {
-          ctx.fillStyle = COLORS.roofMid;
+          ctx.fillStyle = hp.roofMid;
           ctx.fillRect(sx + rx * s, sy + ry * s, s * 5, s * 2);
-          ctx.fillStyle = COLORS.roofLight;
+          ctx.fillStyle = hp.roofLight;
           ctx.fillRect(sx + rx * s, sy + ry * s, s * 5, s);
         }
       }
@@ -441,29 +435,25 @@ function drawTile(
     }
 
     case TileType.HouseDoor: {
-      ctx.fillStyle = COLORS.wallBase;
+      const hp = getHousePalette(worldX, worldY);
+      ctx.fillStyle = hp.wallBase;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // door
       ctx.fillStyle = COLORS.door;
       ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 10, s * 14);
-      // noren curtain
-      ctx.fillStyle = "#2a4a7a";
+      // noren curtain — use roof color for variety
+      ctx.fillStyle = hp.roofDark;
       ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 10, s * 6);
-      ctx.fillStyle = "#e8dcc0";
-      // curtain pattern
+      ctx.fillStyle = hp.wallLight;
       ctx.fillRect(sx + 5 * s, sy + 3 * s, s * 2, s);
       ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 2, s);
-      // split in curtain
       ctx.fillStyle = COLORS.door;
       ctx.fillRect(sx + 7 * s, sy + 4 * s, s * 2, s * 4);
       break;
     }
 
     case TileType.TreeTrunk: {
-      // draw grass underneath
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // trunk
       ctx.fillStyle = COLORS.trunkDark;
       ctx.fillRect(sx + 6 * s, sy, s * 4, SCALED_TILE);
       ctx.fillStyle = COLORS.trunk;
@@ -474,14 +464,12 @@ function drawTile(
     case TileType.TreeCanopy: {
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // cherry blossom canopy
       ctx.fillStyle = COLORS.leaves1;
       ctx.fillRect(sx + s, sy + s, s * 14, s * 14);
       ctx.fillStyle = COLORS.leaves2;
       ctx.fillRect(sx + 2 * s, sy + 2 * s, s * 12, s * 10);
       ctx.fillStyle = COLORS.leaves3;
       ctx.fillRect(sx + 3 * s, sy + 3 * s, s * 8, s * 6);
-      // petals
       const petalRng = seededRandom(hash + Math.floor(time / 2000));
       ctx.fillStyle = COLORS.petal;
       for (let i = 0; i < 5; i++) {
@@ -495,17 +483,13 @@ function drawTile(
     case TileType.Lantern: {
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // pole
       ctx.fillStyle = COLORS.lanternPole;
       ctx.fillRect(sx + 7 * s, sy + 6 * s, s * 2, s * 10);
-      // lantern body
       ctx.fillStyle = COLORS.lanternBody;
       ctx.fillRect(sx + 5 * s, sy + 2 * s, s * 6, s * 5);
-      // glow
       const glowI = 0.3 + Math.sin(time * 0.003 + hash * 0.1) * 0.15;
       ctx.fillStyle = `rgba(255, 100, 50, ${glowI})`;
       ctx.fillRect(sx + 3 * s, sy, s * 10, s * 9);
-      // top
       ctx.fillStyle = COLORS.lanternPole;
       ctx.fillRect(sx + 4 * s, sy + s, s * 8, s);
       ctx.fillRect(sx + 4 * s, sy + 7 * s, s * 8, s);
@@ -515,12 +499,10 @@ function drawTile(
     case TileType.Bridge: {
       ctx.fillStyle = COLORS.wood;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // planks
       ctx.fillStyle = COLORS.woodDark;
       for (let py = 0; py < 16; py += 4) {
         ctx.fillRect(sx, sy + py * s, SCALED_TILE, s);
       }
-      // railings
       ctx.fillStyle = COLORS.bridgeRail;
       ctx.fillRect(sx, sy, s * 2, SCALED_TILE);
       ctx.fillRect(sx + 14 * s, sy, s * 2, SCALED_TILE);
@@ -530,15 +512,12 @@ function drawTile(
     case TileType.Torii: {
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // pillars
       ctx.fillStyle = COLORS.toriRed;
       ctx.fillRect(sx + 5 * s, sy, s * 3, SCALED_TILE);
-      // crossbar (top)
       ctx.fillStyle = COLORS.toriRedDark;
       ctx.fillRect(sx, sy, SCALED_TILE, s * 3);
       ctx.fillStyle = COLORS.toriRed;
       ctx.fillRect(sx, sy + s, SCALED_TILE, s * 2);
-      // second crossbar
       ctx.fillRect(sx + 2 * s, sy + 5 * s, s * 12, s * 2);
       break;
     }
@@ -547,7 +526,6 @@ function drawTile(
       ctx.fillStyle = COLORS.stone;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
       ctx.fillStyle = COLORS.stoneDark;
-      // stone pattern
       for (let ry = 0; ry < 16; ry += 4) {
         for (let rx = (ry % 8 === 0 ? 0 : 4); rx < 16; rx += 8) {
           ctx.fillRect(sx + rx * s, sy + ry * s, s, s * 3);
@@ -560,11 +538,9 @@ function drawTile(
     case TileType.Fence: {
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // horizontal beams
       ctx.fillStyle = COLORS.fenceWood;
       ctx.fillRect(sx, sy + 4 * s, SCALED_TILE, s * 2);
       ctx.fillRect(sx, sy + 10 * s, SCALED_TILE, s * 2);
-      // vertical post
       ctx.fillStyle = COLORS.woodDark;
       ctx.fillRect(sx + 6 * s, sy + 2 * s, s * 3, s * 12);
       break;
@@ -573,13 +549,11 @@ function drawTile(
     case TileType.Bamboo: {
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
-      // bamboo stalk
       ctx.fillStyle = COLORS.bamboo;
       ctx.fillRect(sx + 6 * s, sy, s * 3, SCALED_TILE);
       ctx.fillStyle = COLORS.bambooDark;
       ctx.fillRect(sx + 6 * s, sy + 5 * s, s * 3, s);
       ctx.fillRect(sx + 6 * s, sy + 11 * s, s * 3, s);
-      // leaves
       ctx.fillStyle = COLORS.bamboo;
       ctx.fillRect(sx + 3 * s, sy + s, s * 4, s * 2);
       ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 5, s * 2);
@@ -594,7 +568,6 @@ function drawTile(
       ctx.fillRect(sx + 2 * s, sy + 4 * s, s * 12, s * 10);
       ctx.fillStyle = COLORS.bushLight;
       ctx.fillRect(sx + 3 * s, sy + 5 * s, s * 10, s * 6);
-      // flowers on some bushes
       if ((hash & 3) === 0) {
         ctx.fillStyle = COLORS.flowerWhite;
         ctx.fillRect(sx + 5 * s, sy + 6 * s, s * 2, s * 2);
@@ -604,7 +577,6 @@ function drawTile(
     }
 
     case TileType.Garden: {
-      // stepping stones on grass
       ctx.fillStyle = COLORS.grass2;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
       ctx.fillStyle = COLORS.stone;
@@ -632,12 +604,9 @@ function drawCharacter(
   _time: number
 ) {
   const s = SCALE;
-  const f = frame % 4; // 4 frame walk cycle
-
-  // offset for body bob
+  const f = frame % 4;
   const bob = f === 1 || f === 3 ? -s : 0;
 
-  // ── BODY (simple kimono/yukata style) ──
   // sandals
   const footOffset = f === 0 ? -s : f === 2 ? s : 0;
   ctx.fillStyle = "#8b6f4e";
@@ -653,13 +622,12 @@ function drawCharacter(
   ctx.fillStyle = "#1a1a3a";
   ctx.fillRect(sx + 5 * s, sy + 11 * s + bob, s * 6, s * 4);
 
-  // kimono body
+  // kimono
   ctx.fillStyle = "#3a4a6a";
   ctx.fillRect(sx + 4 * s, sy + 5 * s + bob, s * 8, s * 7);
-  // kimono lighter inner
   ctx.fillStyle = "#4a5a7a";
   ctx.fillRect(sx + 6 * s, sy + 5 * s + bob, s * 4, s * 5);
-  // obi (belt)
+  // obi
   ctx.fillStyle = "#8b3a3a";
   ctx.fillRect(sx + 4 * s, sy + 9 * s + bob, s * 8, s * 2);
 
@@ -693,7 +661,6 @@ function drawCharacter(
 
   // face
   if (dir !== "up") {
-    // eyes
     ctx.fillStyle = "#1a1a2a";
     if (dir === "left") {
       ctx.fillRect(sx + 5 * s, sy + 3 * s + bob, s, s);
@@ -714,9 +681,74 @@ function drawCharacter(
   ctx.fillRect(sx + 4 * s, sy - 3 * s + bob, s * 8, s);
   ctx.fillStyle = "#b49858";
   ctx.fillRect(sx + 6 * s, sy - 4 * s + bob, s * 4, s);
-  // hat band
   ctx.fillStyle = "#8b3a3a";
   ctx.fillRect(sx + 2 * s, sy - s + bob, s * 12, s);
+}
+
+// ─── Title Screen Drawing ───────────────────────────────────────────────────
+
+// Pixel-art brush-stroke letters for "ZOZI"
+const LETTER_Z = [
+  "XXXXXXX",
+  "     XX",
+  "    XX ",
+  "   XX  ",
+  "  XX   ",
+  " XX    ",
+  "XXXXXXX",
+];
+const LETTER_O = [
+  " XXXXX ",
+  "XX   XX",
+  "XX   XX",
+  "XX   XX",
+  "XX   XX",
+  "XX   XX",
+  " XXXXX ",
+];
+const LETTER_I = [
+  "  XXX  ",
+  "   X   ",
+  "   X   ",
+  "   X   ",
+  "   X   ",
+  "   X   ",
+  "  XXX  ",
+];
+
+function drawTitleZOZI(ctx: CanvasRenderingContext2D, cx: number, cy: number, time: number) {
+  const letters = [LETTER_Z, LETTER_O, LETTER_Z, LETTER_I];
+  const pixSize = 5;
+  const letterW = 7 * pixSize;
+  const gap = pixSize * 3;
+  const totalW = letters.length * letterW + (letters.length - 1) * gap;
+  let startX = cx - totalW / 2;
+  const startY = cy - (7 * pixSize) / 2;
+
+  for (let li = 0; li < letters.length; li++) {
+    const letter = letters[li];
+    for (let row = 0; row < letter.length; row++) {
+      for (let col = 0; col < letter[row].length; col++) {
+        if (letter[row][col] === "X") {
+          const px = startX + col * pixSize;
+          const py = startY + row * pixSize;
+          // subtle per-pixel shimmer
+          const shimmer = Math.sin(time * 0.002 + li * 1.5 + row * 0.3 + col * 0.5) * 0.08;
+          const base = 0.82 + shimmer;
+          const r = Math.floor(212 * base);
+          const g = Math.floor(184 * base);
+          const b = Math.floor(120 * base);
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(px, py, pixSize, pixSize);
+          // slight brush edge
+          ctx.fillStyle = `rgba(180, 152, 88, ${0.3 + shimmer})`;
+          ctx.fillRect(px + pixSize - 1, py, 1, pixSize);
+          ctx.fillRect(px, py + pixSize - 1, pixSize, 1);
+        }
+      }
+    }
+    startX += letterW + gap;
+  }
 }
 
 // ─── Falling Petals ─────────────────────────────────────────────────────────
@@ -732,6 +764,8 @@ interface Petal {
 
 // ─── Audio Engine ───────────────────────────────────────────────────────────
 
+type Surface = "grass" | "stone";
+
 class ZenAudio {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -740,6 +774,7 @@ class ZenAudio {
   private noteTimeout: ReturnType<typeof setTimeout> | null = null;
   private droneOsc: OscillatorNode | null = null;
   private droneOsc2: OscillatorNode | null = null;
+
 
   async init() {
     if (this.ctx) return;
@@ -757,31 +792,29 @@ class ZenAudio {
     if (this.isPlaying || !this.ctx || !this.musicGain) return;
     this.isPlaying = true;
 
-    // Drone - deep sustained pad
+    // Drone
     const droneGain = this.ctx.createGain();
     droneGain.gain.value = 0.08;
     droneGain.connect(this.musicGain);
 
     this.droneOsc = this.ctx.createOscillator();
     this.droneOsc.type = "sine";
-    this.droneOsc.frequency.value = 110; // A2
+    this.droneOsc.frequency.value = 110;
     this.droneOsc.connect(droneGain);
     this.droneOsc.start();
 
     this.droneOsc2 = this.ctx.createOscillator();
     this.droneOsc2.type = "sine";
-    this.droneOsc2.frequency.value = 164.81; // E3
+    this.droneOsc2.frequency.value = 164.81;
     this.droneOsc2.connect(droneGain);
     this.droneOsc2.start();
 
-    // Start playing pentatonic melody
     this.playNextNote();
   }
 
   private playNextNote() {
     if (!this.isPlaying || !this.ctx || !this.musicGain) return;
 
-    // Japanese pentatonic (in scale) - Miyako-bushi-ish
     const notes = [220, 246.94, 293.66, 329.63, 392, 440, 493.88, 587.33];
     const freq = notes[Math.floor(Math.random() * notes.length)];
     const duration = 1.5 + Math.random() * 3;
@@ -800,7 +833,6 @@ class ZenAudio {
     osc.start(this.ctx.currentTime);
     osc.stop(this.ctx.currentTime + duration);
 
-    // Sometimes add a harmonic
     if (Math.random() > 0.6) {
       const osc2 = this.ctx.createOscillator();
       osc2.type = "triangle";
@@ -819,11 +851,12 @@ class ZenAudio {
     this.noteTimeout = setTimeout(() => this.playNextNote(), nextDelay);
   }
 
-  playFootstep() {
+  playFootstep(surface: Surface) {
     if (!this.ctx || !this.masterGain) return;
-
     const now = this.ctx.currentTime;
-    // Soft footstep sound
+
+    // Both surfaces use gentle lowpass noise — stone is just slightly brighter
+    const isStone = surface === "stone";
     const bufferSize = this.ctx.sampleRate * 0.08;
     const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -834,10 +867,12 @@ class ZenAudio {
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
 
-    // Low pass filter for soft sound
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
-    filter.frequency.value = 600 + Math.random() * 200;
+    // stone: slightly higher cutoff for a subtle difference, grass: softer
+    filter.frequency.value = isStone
+      ? 650 + Math.random() * 150
+      : 450 + Math.random() * 100;
 
     const stepGain = this.ctx.createGain();
     stepGain.gain.setValueAtTime(0.06 + Math.random() * 0.02, now);
@@ -852,14 +887,8 @@ class ZenAudio {
   stop() {
     this.isPlaying = false;
     if (this.noteTimeout) clearTimeout(this.noteTimeout);
-    if (this.droneOsc) {
-      this.droneOsc.stop();
-      this.droneOsc = null;
-    }
-    if (this.droneOsc2) {
-      this.droneOsc2.stop();
-      this.droneOsc2 = null;
-    }
+    if (this.droneOsc) { this.droneOsc.stop(); this.droneOsc = null; }
+    if (this.droneOsc2) { this.droneOsc2.stop(); this.droneOsc2 = null; }
   }
 }
 
@@ -867,11 +896,12 @@ class ZenAudio {
 
 export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const titleCanvasRef = useRef<HTMLCanvasElement>(null);
   const [started, setStarted] = useState(false);
   const audioRef = useRef<ZenAudio | null>(null);
 
   // Game state refs
-  const playerRef = useRef({ x: 0.5, y: 0.5 }); // spawn on road intersection
+  const playerRef = useRef({ x: 0.5, y: 0.5 });
   const dirRef = useRef<Direction>("down");
   const movingRef = useRef(false);
   const keysRef = useRef<Set<string>>(new Set());
@@ -903,18 +933,36 @@ export default function Game() {
     [getChunk]
   );
 
+  const getTileAt = useCallback(
+    (worldX: number, worldY: number): TileType => {
+      const cx = Math.floor(worldX / CHUNK_SIZE);
+      const cy = Math.floor(worldY / CHUNK_SIZE);
+      const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const ly = ((worldY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const chunk = getChunk(cx, cy);
+      return chunk.tiles[ly][lx];
+    },
+    [getChunk]
+  );
+
   const startGame = useCallback(async () => {
+    if (started) return;
     setStarted(true);
     if (!audioRef.current) {
       audioRef.current = new ZenAudio();
     }
     await audioRef.current.start();
-  }, []);
+  }, [started]);
 
-  // Input handling
+  // Input handling + keyboard start
   useEffect(() => {
+    const moveKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "w", "a", "s", "d"]);
     const onKeyDown = (e: KeyboardEvent) => {
       keysRef.current.add(e.key);
+      // Start game on movement key press
+      if (moveKeys.has(e.key) && !started) {
+        startGame();
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => {
       keysRef.current.delete(e.key);
@@ -925,7 +973,82 @@ export default function Game() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, []);
+  }, [started, startGame]);
+
+  // Title screen canvas animation
+  useEffect(() => {
+    if (started) return;
+    const canvas = titleCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    let animFrame: number;
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    resize();
+    window.addEventListener("resize", resize);
+
+    // Title petals
+    const titlePetals: Petal[] = [];
+
+    const loop = (time: number) => {
+      animFrame = requestAnimationFrame(loop);
+      const w = canvas.width;
+      const h = canvas.height;
+
+      ctx.fillStyle = "#1a1a2e";
+      ctx.fillRect(0, 0, w, h);
+
+      // floating petals in background
+      if (Math.random() < 0.04) {
+        titlePetals.push({
+          x: Math.random() * w,
+          y: -10,
+          vx: -0.3 + Math.random() * 0.6,
+          vy: 0.3 + Math.random() * 0.5,
+          life: 400 + Math.random() * 300,
+          size: 2 + Math.random() * 3,
+        });
+      }
+      for (const p of titlePetals) {
+        p.x += p.vx + Math.sin(time * 0.001 + p.y * 0.01) * 0.3;
+        p.y += p.vy;
+        p.life--;
+        const alpha = Math.min(1, p.life / 60) * 0.25;
+        ctx.fillStyle = `rgba(255, 176, 192, ${alpha})`;
+        ctx.fillRect(p.x, p.y, p.size, p.size * 0.6);
+      }
+      // prune dead petals
+      for (let i = titlePetals.length - 1; i >= 0; i--) {
+        if (titlePetals[i].life <= 0) titlePetals.splice(i, 1);
+      }
+
+      // Draw ZOZI pixel title
+      drawTitleZOZI(ctx, w / 2, h / 2 - 20, time);
+
+      // Subtle prompt text
+      const pulse = 0.3 + Math.sin(time * 0.003) * 0.15;
+      ctx.fillStyle = `rgba(106, 106, 90, ${pulse})`;
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("press any arrow key to begin", w / 2, h / 2 + 50);
+
+      // vignette
+      const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.25, w / 2, h / 2, w * 0.65);
+      gradient.addColorStop(0, "rgba(0,0,0,0)");
+      gradient.addColorStop(1, "rgba(0,0,0,0.5)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, w, h);
+    };
+
+    animFrame = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(animFrame);
+      window.removeEventListener("resize", resize);
+    };
+  }, [started]);
 
   // Game loop
   useEffect(() => {
@@ -963,7 +1086,6 @@ export default function Game() {
       movingRef.current = dx !== 0 || dy !== 0;
 
       if (movingRef.current) {
-        // normalize diagonal
         if (dx !== 0 && dy !== 0) {
           dx *= 0.707;
           dy *= 0.707;
@@ -971,19 +1093,16 @@ export default function Game() {
         const nx = playerRef.current.x + dx * MOVE_SPEED;
         const ny = playerRef.current.y + dy * MOVE_SPEED;
 
-        // AABB collision - player hitbox is ~0.3 tile radius from center
         const R = 0.3;
         const px = playerRef.current.x;
         const py = playerRef.current.y;
 
-        // Try Y movement (keep current X)
         const canMoveY = !isSolid(Math.floor(px - R), Math.floor(ny - R)) &&
           !isSolid(Math.floor(px + R), Math.floor(ny - R)) &&
           !isSolid(Math.floor(px - R), Math.floor(ny + R)) &&
           !isSolid(Math.floor(px + R), Math.floor(ny + R));
         if (canMoveY) playerRef.current.y = ny;
 
-        // Try X movement (use updated Y)
         const fy = playerRef.current.y;
         const canMoveX = !isSolid(Math.floor(nx - R), Math.floor(fy - R)) &&
           !isSolid(Math.floor(nx + R), Math.floor(fy - R)) &&
@@ -998,10 +1117,12 @@ export default function Game() {
           frameRef.current += 1;
         }
 
-        // footsteps
+        // footsteps — surface-aware
         if (time - lastStepRef.current > 280) {
           lastStepRef.current = time;
-          audioRef.current?.playFootstep();
+          const tile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
+          const surface: Surface = isStoneSurface(tile) ? "stone" : "grass";
+          audioRef.current?.playFootstep(surface);
         }
       } else {
         walkTimerRef.current = 0;
@@ -1029,51 +1150,47 @@ export default function Game() {
       // ── Render ──
       ctx.imageSmoothingEnabled = false;
 
-      // camera centered on player
       const camX = playerRef.current.x * SCALED_TILE - w / 2;
       const camY = playerRef.current.y * SCALED_TILE - h / 2;
 
-      // clear
       ctx.fillStyle = "#1a1a2e";
       ctx.fillRect(0, 0, w, h);
 
-      // determine visible tile range
       const startTileX = Math.floor(camX / SCALED_TILE) - 1;
       const startTileY = Math.floor(camY / SCALED_TILE) - 1;
       const endTileX = Math.ceil((camX + w) / SCALED_TILE) + 1;
       const endTileY = Math.ceil((camY + h) / SCALED_TILE) + 1;
 
-      // render tiles
       for (let ty = startTileY; ty <= endTileY; ty++) {
         for (let tx = startTileX; tx <= endTileX; tx++) {
-          const cx = Math.floor(tx / CHUNK_SIZE);
-          const cy = Math.floor(ty / CHUNK_SIZE);
+          const chunkX = Math.floor(tx / CHUNK_SIZE);
+          const chunkY = Math.floor(ty / CHUNK_SIZE);
           const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
           const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-          const chunk = getChunk(cx, cy);
+          const chunk = getChunk(chunkX, chunkY);
           const screenX = Math.floor(tx * SCALED_TILE - camX);
           const screenY = Math.floor(ty * SCALED_TILE - camY);
           drawTile(ctx, chunk.tiles[ly][lx], screenX, screenY, tx, ty, time);
         }
       }
 
-      // render character
+      // character
       const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
       const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
       drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time);
 
-      // render petals
+      // petals
       ctx.fillStyle = COLORS.petal;
       for (const p of petalsRef.current) {
-        const px = Math.floor(p.x * SCALED_TILE - camX);
-        const py = Math.floor(p.y * SCALED_TILE - camY);
+        const ppx = Math.floor(p.x * SCALED_TILE - camX);
+        const ppy = Math.floor(p.y * SCALED_TILE - camY);
         const alpha = Math.min(1, p.life / 50);
         ctx.globalAlpha = alpha * 0.8;
-        ctx.fillRect(px, py, p.size * SCALE, p.size * SCALE * 0.6);
+        ctx.fillRect(ppx, ppy, p.size * SCALE, p.size * SCALE * 0.6);
       }
       ctx.globalAlpha = 1;
 
-      // vignette overlay
+      // vignette
       const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
       gradient.addColorStop(0, "rgba(0,0,0,0)");
       gradient.addColorStop(1, "rgba(0,0,0,0.4)");
@@ -1087,43 +1204,20 @@ export default function Game() {
       cancelAnimationFrame(animFrame);
       window.removeEventListener("resize", resize);
     };
-  }, [started, getChunk, isSolid]);
+  }, [started, getChunk, isSolid, getTileAt]);
 
-  // Cleanup audio on unmount
+  // Cleanup
   useEffect(() => {
-    return () => {
-      audioRef.current?.stop();
-    };
+    return () => { audioRef.current?.stop(); };
   }, []);
 
   if (!started) {
     return (
-      <div
-        className="flex flex-col items-center justify-center h-screen bg-[#1a1a2e] cursor-pointer"
+      <canvas
+        ref={titleCanvasRef}
+        className="block w-screen h-screen cursor-pointer"
         onClick={startGame}
-      >
-        <div className="text-center">
-          <h1
-            className="text-6xl mb-4 tracking-widest"
-            style={{
-              color: "#d4b878",
-              fontFamily: "serif",
-              textShadow: "0 0 40px rgba(212,184,120,0.3)",
-            }}
-          >
-            ZOZI
-          </h1>
-          <p className="text-[#8a8a7a] text-sm tracking-[0.3em] mb-2">
-            A PEACEFUL WALK
-          </p>
-          <div className="mt-12 text-[#6a6a5a] text-xs tracking-wider animate-pulse">
-            click anywhere to begin
-          </div>
-          <div className="mt-6 text-[#4a4a4a] text-xs tracking-wider">
-            arrow keys or WASD to walk
-          </div>
-        </div>
-      </div>
+      />
     );
   }
 
