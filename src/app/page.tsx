@@ -107,6 +107,30 @@ const ZOZI_PALETTE = {
   roofDark: "#b8860b", roofMid: "#d4a017", roofLight: "#ffd700",
 };
 
+// ─── Fish Types ──────────────────────────────────────────────────────────────
+
+type FishingState = "idle" | "casting" | "waiting" | "bite" | "caught";
+
+const FISH_TYPES = [
+  { name: "common carp", weight: 35, color: "#8b6914", holdTime: 200 },
+  { name: "sweetfish", weight: 25, color: "#7a9bb5", holdTime: 350 },
+  { name: "koi", weight: 18, color: "#cc5533", holdTime: 500 },
+  { name: "catfish", weight: 12, color: "#3a3a3a", holdTime: 700 },
+  { name: "golden koi", weight: 7, color: "#d4a017", holdTime: 1000 },
+  { name: "spirit fish", weight: 3, color: "#8844aa", holdTime: 1300 },
+];
+
+const FISH_TOTAL_WEIGHT = FISH_TYPES.reduce((s, f) => s + f.weight, 0);
+
+function rollFish(): { name: string; color: string; holdTime: number } {
+  let r = Math.random() * FISH_TOTAL_WEIGHT;
+  for (const f of FISH_TYPES) {
+    r -= f.weight;
+    if (r <= 0) return { name: f.name, color: f.color, holdTime: f.holdTime };
+  }
+  return FISH_TYPES[0];
+}
+
 interface OverlayTile { type: TileType; solid: boolean }
 
 function isRoadTile(wx: number, wy: number): boolean {
@@ -827,7 +851,8 @@ function drawCharacter(
   dir: Direction,
   frame: number,
   _time: number,
-  hasGoldenBamboo = false
+  hasGoldenBamboo = false,
+  fishingState: FishingState = "idle"
 ) {
   const s = SCALE;
   const f = frame % 4;
@@ -935,6 +960,167 @@ function drawCharacter(
     ctx.fillStyle = "#b8860b";
     ctx.fillRect(bx, by + s * 3, s, s);
     ctx.fillRect(bx, by + s * 7, s, s);
+  }
+
+  // fishing rod in hand
+  if (fishingState !== "idle") {
+    let handX: number, handY: number, tipX: number, tipY: number;
+    if (dir === "right") {
+      handX = sx + 13 * s; handY = sy + 7 * s + bob;
+      tipX = handX + s * 10; tipY = handY - s * 10;
+    } else if (dir === "left") {
+      handX = sx + 3 * s; handY = sy + 7 * s + bob;
+      tipX = handX - s * 10; tipY = handY - s * 10;
+    } else if (dir === "up") {
+      handX = sx + 13 * s; handY = sy + 7 * s + bob;
+      tipX = handX + s * 4; tipY = handY - s * 12;
+    } else {
+      handX = sx + 13 * s; handY = sy + 7 * s + bob;
+      tipX = handX + s * 4; tipY = handY - s * 12;
+    }
+    // rod shaft
+    ctx.strokeStyle = "#5a8a4a";
+    ctx.lineWidth = s * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(handX + s / 2, handY);
+    ctx.lineTo(tipX + s / 2, tipY);
+    ctx.stroke();
+    // rod tip
+    ctx.fillStyle = "#3a6a2a";
+    ctx.fillRect(tipX, tipY - s / 2, s, s);
+  }
+}
+
+// ─── Fishing Helpers ─────────────────────────────────────────────────────────
+
+function findNearestWater(
+  px: number, py: number,
+  getTile: (wx: number, wy: number) => TileType
+): { wx: number; wy: number; dir: Direction } | null {
+  const baseTx = Math.floor(px);
+  const baseTy = Math.floor(py);
+  let best: { wx: number; wy: number; dist: number; dir: Direction } | null = null;
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      const tx = baseTx + dx;
+      const ty = baseTy + dy;
+      const dist = Math.abs(px - tx - 0.5) + Math.abs(py - ty - 0.5);
+      if (dist < 2 && getTile(tx, ty) === TileType.Water) {
+        if (!best || dist < best.dist) {
+          let dir: Direction = "down";
+          const ddx = tx + 0.5 - px;
+          const ddy = ty + 0.5 - py;
+          if (Math.abs(ddx) > Math.abs(ddy)) dir = ddx > 0 ? "right" : "left";
+          else dir = ddy > 0 ? "down" : "up";
+          best = { wx: tx, wy: ty, dist, dir };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function drawPixelFish(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number, color: string, time: number
+) {
+  const s = SCALE;
+  const flop = Math.sin(time * 0.01) > 0 ? 0 : s;
+  // body
+  ctx.fillStyle = color;
+  ctx.fillRect(cx - s * 3, cy - s, s * 6, s * 2);
+  // head
+  ctx.fillRect(cx + s * 3, cy - s, s, s * 2);
+  // tail
+  ctx.fillRect(cx - s * 4, cy - s * 2 + flop, s, s * 3);
+  // eye
+  ctx.fillStyle = "#111";
+  ctx.fillRect(cx + s * 2, cy - s, s, s);
+}
+
+function drawFishingOverlay(
+  ctx: CanvasRenderingContext2D,
+  charSX: number, charSY: number,
+  waterScreenX: number, waterScreenY: number,
+  fishingState: FishingState, time: number,
+  fishColor: string, catchStartTime: number,
+  dir: Direction
+) {
+  const s = SCALE;
+  const halfTile = SCALED_TILE / 2;
+
+  if (fishingState === "idle") return;
+
+  // Rod tip must match drawCharacter's fishing rod tip position
+  // drawCharacter receives sx = charSX, so we use the same offsets
+  const bob = 0; // character is stationary while fishing (frame=0)
+  let rodTipX: number, rodTipY: number;
+  if (dir === "right") {
+    const handX = charSX + 13 * s;
+    const handY = charSY + 7 * s + bob;
+    rodTipX = handX + s * 10 + s / 2;
+    rodTipY = handY - s * 10;
+  } else if (dir === "left") {
+    const handX = charSX + 3 * s;
+    const handY = charSY + 7 * s + bob;
+    rodTipX = handX - s * 10 + s / 2;
+    rodTipY = handY - s * 10;
+  } else {
+    const handX = charSX + 13 * s;
+    const handY = charSY + 7 * s + bob;
+    rodTipX = handX + s * 4 + s / 2;
+    rodTipY = handY - s * 12;
+  }
+  const bobberX = waterScreenX + halfTile;
+  const bobberY = waterScreenY + halfTile;
+
+  // Line with sag
+  ctx.strokeStyle = "rgba(200,200,200,0.6)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(rodTipX, rodTipY);
+  const cpX = (rodTipX + bobberX) / 2;
+  const cpY = Math.max(rodTipY, bobberY) + 15;
+  ctx.quadraticCurveTo(cpX, cpY, bobberX, bobberY);
+  ctx.stroke();
+
+  // Bobber
+  const bobberBob = fishingState === "bite"
+    ? Math.sin(time * 0.02) * s * 2
+    : Math.sin(time * 0.003) * s * 0.5;
+  const by = bobberY + bobberBob;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(bobberX - s, by - s * 2, s * 2, s * 2);
+  ctx.fillStyle = "#cc3333";
+  ctx.fillRect(bobberX - s, by - s * 4, s * 2, s * 2);
+
+  // Splash rings during bite
+  if (fishingState === "bite") {
+    const ringAlpha = 0.3 + Math.sin(time * 0.015) * 0.2;
+    ctx.strokeStyle = `rgba(150,200,255,${ringAlpha})`;
+    ctx.lineWidth = 1.5;
+    const ringR = s * 3 + Math.sin(time * 0.01) * s * 2;
+    ctx.beginPath();
+    ctx.ellipse(bobberX, by, ringR, ringR * 0.4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    const ringR2 = s * 5 + Math.sin(time * 0.008) * s * 2;
+    ctx.beginPath();
+    ctx.ellipse(bobberX, by, ringR2, ringR2 * 0.4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Fish sprite during caught state — rises and fades out
+  if (fishingState === "caught") {
+    const elapsed = performance.now() - catchStartTime;
+    const duration = 3000;
+    const t = Math.min(elapsed / duration, 1);
+    const rise = t * s * 30;
+    const alpha = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3;
+    const fishY = bobberY - s * 6 - rise;
+    ctx.globalAlpha = Math.max(0, alpha);
+    drawPixelFish(ctx, bobberX, fishY, fishColor, time);
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -1306,6 +1492,30 @@ class ZenAudio {
     source.start(now);
   }
 
+  playFishingSplash() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const bufferSize = Math.floor(this.ctx.sampleRate * 0.25);
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.2));
+    }
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.value = 800 + Math.random() * 400;
+    filter.Q.value = 0.8;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    source.start(now);
+  }
+
   stop() {
     this.isPlaying = false;
     if (this.noteTimeout) clearTimeout(this.noteTimeout);
@@ -1341,6 +1551,15 @@ export default function Game() {
   const savedPosRef = useRef({ x: 0, y: 0 });
   const pickupMsgRef = useRef(0);
   const pulsatingLanternsRef = useRef<Set<string>>(new Set());
+
+  // Fishing state
+  const fishingStateRef = useRef<FishingState>("idle");
+  const fishingStartTimeRef = useRef(0);
+  const fishingDirRef = useRef<Direction>("down");
+  const fishingWaterTileRef = useRef({ x: 0, y: 0 });
+  const fishingBiteTimeRef = useRef(0);
+  const fishingCaughtFishRef = useRef<{ name: string; color: string; holdTime: number }>({ name: "", color: "", holdTime: 0 });
+  const fishingHoldRef = useRef(0);
 
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
@@ -1450,6 +1669,10 @@ export default function Game() {
         return;
       }
       keysRef.current.add(e.key);
+      // Movement or Escape cancels fishing
+      if ((moveKeys.has(e.key) || e.key === "Escape") && fishingStateRef.current !== "idle") {
+        fishingStateRef.current = "idle";
+      }
       // Start game on movement key press
       if (moveKeys.has(e.key) && !started) {
         startGame();
@@ -1484,6 +1707,26 @@ export default function Game() {
             }
           }
         }
+      }
+      // F key: fishing interaction
+      if ((e.key === "f" || e.key === "F") && started && !insideHouseRef.current) {
+        const fs = fishingStateRef.current;
+        if (fs === "idle") {
+          const water = findNearestWater(playerRef.current.x, playerRef.current.y, getTileAt);
+          if (water) {
+            fishingStateRef.current = "casting";
+            fishingStartTimeRef.current = performance.now();
+            fishingDirRef.current = water.dir;
+            fishingWaterTileRef.current = { x: water.wx, y: water.wy };
+            fishingBiteTimeRef.current = 3000 + Math.random() * 5000;
+            dirRef.current = water.dir;
+            audioRef.current?.playFishingSplash();
+          }
+        } else if (fs === "waiting") {
+          // Pressed too early — cancel
+          fishingStateRef.current = "idle";
+        }
+        // bite: handled by holding F in game loop; caught: auto-expires after 3s
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -1649,32 +1892,68 @@ export default function Game() {
           dirRef.current, frameRef.current, time);
       } else {
         // ── Overworld mode ──
-        if (movingRef.current) {
-          if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
-          const nx = playerRef.current.x + dx * MOVE_SPEED;
-          const ny = playerRef.current.y + dy * MOVE_SPEED;
-          const R = 0.3;
-          const px = playerRef.current.x, py = playerRef.current.y;
-          if (!isSolid(Math.floor(px - R), Math.floor(ny - R)) &&
-              !isSolid(Math.floor(px + R), Math.floor(ny - R)) &&
-              !isSolid(Math.floor(px - R), Math.floor(ny + R)) &&
-              !isSolid(Math.floor(px + R), Math.floor(ny + R)))
-            playerRef.current.y = ny;
-          const fy = playerRef.current.y;
-          if (!isSolid(Math.floor(nx - R), Math.floor(fy - R)) &&
-              !isSolid(Math.floor(nx + R), Math.floor(fy - R)) &&
-              !isSolid(Math.floor(nx - R), Math.floor(fy + R)) &&
-              !isSolid(Math.floor(nx + R), Math.floor(fy + R)))
-            playerRef.current.x = nx;
-          walkTimerRef.current += 1;
-          if (walkTimerRef.current >= 8) { walkTimerRef.current = 0; frameRef.current += 1; }
-          if (time - lastStepRef.current > 280) {
-            lastStepRef.current = time;
-            const tile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
-            const surface: Surface = isStoneSurface(tile) ? "stone" : "grass";
-            audioRef.current?.playFootstep(surface);
+        if (fishingStateRef.current === "idle") {
+          // Normal movement — only when not fishing
+          if (movingRef.current) {
+            if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+            const nx = playerRef.current.x + dx * MOVE_SPEED;
+            const ny = playerRef.current.y + dy * MOVE_SPEED;
+            const R = 0.3;
+            const px = playerRef.current.x, py = playerRef.current.y;
+            if (!isSolid(Math.floor(px - R), Math.floor(ny - R)) &&
+                !isSolid(Math.floor(px + R), Math.floor(ny - R)) &&
+                !isSolid(Math.floor(px - R), Math.floor(ny + R)) &&
+                !isSolid(Math.floor(px + R), Math.floor(ny + R)))
+              playerRef.current.y = ny;
+            const fy = playerRef.current.y;
+            if (!isSolid(Math.floor(nx - R), Math.floor(fy - R)) &&
+                !isSolid(Math.floor(nx + R), Math.floor(fy - R)) &&
+                !isSolid(Math.floor(nx - R), Math.floor(fy + R)) &&
+                !isSolid(Math.floor(nx + R), Math.floor(fy + R)))
+              playerRef.current.x = nx;
+            walkTimerRef.current += 1;
+            if (walkTimerRef.current >= 8) { walkTimerRef.current = 0; frameRef.current += 1; }
+            if (time - lastStepRef.current > 280) {
+              lastStepRef.current = time;
+              const tile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
+              const surface: Surface = isStoneSurface(tile) ? "stone" : "grass";
+              audioRef.current?.playFootstep(surface);
+            }
+          } else { walkTimerRef.current = 0; frameRef.current = 0; }
+        } else {
+          // Fishing — face water, freeze movement
+          dirRef.current = fishingDirRef.current;
+          walkTimerRef.current = 0;
+          frameRef.current = 0;
+        }
+
+        // ── Fishing state machine ──
+        const fsNow = performance.now();
+        const fsDelta = fsNow - fishingStartTimeRef.current;
+        if (fishingStateRef.current === "casting" && fsDelta > 800) {
+          fishingStateRef.current = "waiting";
+          fishingStartTimeRef.current = fsNow;
+        } else if (fishingStateRef.current === "waiting" && fsDelta > fishingBiteTimeRef.current) {
+          fishingStateRef.current = "bite";
+          fishingStartTimeRef.current = fsNow;
+          fishingCaughtFishRef.current = rollFish();
+          fishingHoldRef.current = 0;
+        } else if (fishingStateRef.current === "bite") {
+          // Hold F to reel in — rarer fish need longer hold
+          if (keys.has("f") || keys.has("F")) {
+            fishingHoldRef.current += 16.67; // ~1 frame at 60fps
+            if (fishingHoldRef.current >= fishingCaughtFishRef.current.holdTime) {
+              fishingStateRef.current = "caught";
+              fishingStartTimeRef.current = fsNow;
+              audioRef.current?.playFishingSplash();
+            }
+          } else if (fsDelta > 1500) {
+            // Missed the bite
+            fishingStateRef.current = "idle";
           }
-        } else { walkTimerRef.current = 0; frameRef.current = 0; }
+        } else if (fishingStateRef.current === "caught" && fsDelta > 3000) {
+          fishingStateRef.current = "idle";
+        }
 
         // Check house entry
         if (zoziRevealedRef.current) {
@@ -1744,7 +2023,22 @@ export default function Game() {
         // character
         const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
         const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
-        drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current);
+        drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current, fishingStateRef.current);
+
+        // fishing overlay
+        if (fishingStateRef.current !== "idle") {
+          const wt = fishingWaterTileRef.current;
+          const waterSX = Math.floor(wt.x * SCALED_TILE - camX);
+          const waterSY = Math.floor(wt.y * SCALED_TILE - camY);
+          drawFishingOverlay(
+            ctx, charScreenX, charScreenY,
+            waterSX, waterSY,
+            fishingStateRef.current, time,
+            fishingCaughtFishRef.current.color,
+            fishingStartTimeRef.current,
+            dirRef.current
+          );
+        }
 
         // golden bamboo pickup message
         if (pickupMsgRef.current > 0 && time - pickupMsgRef.current < 3000) {
