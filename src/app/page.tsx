@@ -49,6 +49,40 @@ const COLORS = {
   flowerYellow: "#e0c060",
 };
 
+// ─── Time of Day ────────────────────────────────────────────────────────────
+
+function getTimeOfDay() {
+  const now = new Date();
+  const h = now.getHours() + now.getMinutes() / 60;
+
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  const blend = (a: number[], b: number[], t: number) => a.map((v, i) => lerp(v, b[i], t));
+
+  //              tintR  tintG  tintB  tintA  vigA   bgR  bgG  bgB  glow
+  const night  = [15,    20,    60,    0.35,  0.6,   8,   8,   25,  0.18];
+  const dawn   = [200,   120,   80,    0.12,  0.42,  25,  18,  32,  0.06];
+  const day    = [0,     0,     0,     0,     0.35,  26,  26,  46,  0   ];
+  const sunset = [255,   130,   40,    0.15,  0.42,  28,  18,  28,  0   ];
+  const dusk   = [40,    25,    80,    0.28,  0.55,  12,  10,  30,  0.12];
+
+  let p: number[];
+  if      (h < 5)  p = night;
+  else if (h < 7)  p = blend(night, dawn, (h - 5) / 2);
+  else if (h < 9)  p = blend(dawn, day, (h - 7) / 2);
+  else if (h < 16) p = day;
+  else if (h < 18) p = blend(day, sunset, (h - 16) / 2);
+  else if (h < 20) p = blend(sunset, dusk, (h - 18) / 2);
+  else if (h < 22) p = blend(dusk, night, (h - 20) / 2);
+  else             p = night;
+
+  return {
+    tint: `rgba(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])},${p[3].toFixed(3)})`,
+    vignetteAlpha: p[4],
+    bg: `rgb(${Math.round(p[5])},${Math.round(p[6])},${Math.round(p[7])})`,
+    playerGlow: p[8],
+  };
+}
+
 // ─── House Color Palettes (per-block variation) ─────────────────────────────
 
 const HOUSE_PALETTES = [
@@ -1429,8 +1463,9 @@ export default function Game() {
       animFrame = requestAnimationFrame(loop);
       const w = canvas.width;
       const h = canvas.height;
+      const tod = getTimeOfDay();
 
-      ctx.fillStyle = "#1a1a2e";
+      ctx.fillStyle = tod.bg;
       ctx.fillRect(0, 0, w, h);
 
       // floating petals in background
@@ -1470,10 +1505,14 @@ export default function Game() {
       ctx.textAlign = "center";
       ctx.fillText("press any arrow key to begin", w / 2, h / 2 + 72);
 
+      // time-of-day tint
+      ctx.fillStyle = tod.tint;
+      ctx.fillRect(0, 0, w, h);
+
       // vignette
       const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.25, w / 2, h / 2, w * 0.65);
       gradient.addColorStop(0, "rgba(0,0,0,0)");
-      gradient.addColorStop(1, "rgba(0,0,0,0.5)");
+      gradient.addColorStop(1, `rgba(0,0,0,${tod.vignetteAlpha.toFixed(2)})`);
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, w, h);
     };
@@ -1615,7 +1654,8 @@ export default function Game() {
         ctx.imageSmoothingEnabled = false;
         const camX = playerRef.current.x * SCALED_TILE - w / 2;
         const camY = playerRef.current.y * SCALED_TILE - h / 2;
-        ctx.fillStyle = "#1a1a2e";
+        const tod = getTimeOfDay();
+        ctx.fillStyle = tod.bg;
         ctx.fillRect(0, 0, w, h);
 
         const startTileX = Math.floor(camX / SCALED_TILE) - 1;
@@ -1680,10 +1720,27 @@ export default function Game() {
         }
         ctx.globalAlpha = 1;
 
+        // time-of-day tint
+        ctx.fillStyle = tod.tint;
+        ctx.fillRect(0, 0, w, h);
+
+        // player aura glow at night
+        if (tod.playerGlow > 0) {
+          const glowCx = charScreenX + 8 * SCALE;
+          const glowCy = charScreenY + 6 * SCALE;
+          const glowR = SCALED_TILE * 3;
+          const aura = ctx.createRadialGradient(glowCx, glowCy, 0, glowCx, glowCy, glowR);
+          aura.addColorStop(0, `rgba(255,220,160,${(tod.playerGlow * 0.7).toFixed(3)})`);
+          aura.addColorStop(0.3, `rgba(255,200,120,${(tod.playerGlow * 0.3).toFixed(3)})`);
+          aura.addColorStop(1, "rgba(255,200,120,0)");
+          ctx.fillStyle = aura;
+          ctx.fillRect(glowCx - glowR, glowCy - glowR, glowR * 2, glowR * 2);
+        }
+
         // vignette
         const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
         gradient.addColorStop(0, "rgba(0,0,0,0)");
-        gradient.addColorStop(1, "rgba(0,0,0,0.4)");
+        gradient.addColorStop(1, `rgba(0,0,0,${tod.vignetteAlpha.toFixed(2)})`);
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, w, h);
 
