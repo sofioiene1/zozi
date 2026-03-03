@@ -436,18 +436,34 @@ function drawTile(
 
     case TileType.HouseDoor: {
       const hp = getHousePalette(worldX, worldY);
+      // Wall base background
       ctx.fillStyle = hp.wallBase;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      // Wood frame borders (matching HouseWall)
+      ctx.fillStyle = COLORS.woodDark;
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
+      // Door frame
+      ctx.fillStyle = COLORS.woodDark;
+      ctx.fillRect(sx + 4 * s, sy + s, s * 8, s);
+      ctx.fillRect(sx + 4 * s, sy + s, s, s * 14);
+      ctx.fillRect(sx + 11 * s, sy + s, s, s * 14);
+      // Door background
       ctx.fillStyle = COLORS.door;
-      ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 10, s * 14);
-      // noren curtain — use roof color for variety
+      ctx.fillRect(sx + 5 * s, sy + 2 * s, s * 6, s * 13);
+      // Noren curtain — shorter and narrower with slits
       ctx.fillStyle = hp.roofDark;
-      ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 10, s * 6);
-      ctx.fillStyle = hp.wallLight;
-      ctx.fillRect(sx + 5 * s, sy + 3 * s, s * 2, s);
-      ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 2, s);
+      ctx.fillRect(sx + 5 * s, sy + 2 * s, s * 6, s * 5);
+      // Noren center slit
       ctx.fillStyle = COLORS.door;
-      ctx.fillRect(sx + 7 * s, sy + 4 * s, s * 2, s * 4);
+      ctx.fillRect(sx + 7 * s, sy + 4 * s, s * 2, s * 3);
+      // Noren decorative marks
+      ctx.fillStyle = hp.wallLight;
+      ctx.fillRect(sx + 6 * s, sy + 3 * s, s, s);
+      ctx.fillRect(sx + 9 * s, sy + 3 * s, s, s);
+      // Stone threshold
+      ctx.fillStyle = COLORS.stone;
+      ctx.fillRect(sx + 4 * s, sy + 15 * s, s * 8, s);
       break;
     }
 
