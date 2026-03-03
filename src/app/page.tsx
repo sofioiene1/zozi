@@ -460,7 +460,8 @@ function drawTile(
   sy: number,
   worldX: number,
   worldY: number,
-  time: number
+  time: number,
+  pulsating?: boolean
 ) {
   const s = SCALE;
   const hash = hashCoord(worldX, worldY);
@@ -616,15 +617,31 @@ function drawTile(
     }
 
     case TileType.Lantern: {
+      const isZoziLantern = (worldX === 83 && worldY === 64) || (worldX === 92 && worldY === 64);
       ctx.fillStyle = COLORS.grass1;
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      if (pulsating) {
+        const outerGlow = 0.15 + Math.sin(time * 0.006) * 0.12;
+        ctx.fillStyle = isZoziLantern
+          ? `rgba(255, 215, 0, ${outerGlow})`
+          : `rgba(255, 120, 60, ${outerGlow})`;
+        ctx.fillRect(sx - 3 * s, sy - 3 * s, SCALED_TILE + 6 * s, SCALED_TILE + 6 * s);
+      }
       ctx.fillStyle = COLORS.lanternPole;
       ctx.fillRect(sx + 7 * s, sy + 6 * s, s * 2, s * 10);
-      ctx.fillStyle = COLORS.lanternBody;
+      ctx.fillStyle = isZoziLantern && pulsating ? "#d4a017" : COLORS.lanternBody;
       ctx.fillRect(sx + 5 * s, sy + 2 * s, s * 6, s * 5);
-      const glowI = 0.3 + Math.sin(time * 0.003 + hash * 0.1) * 0.15;
-      ctx.fillStyle = `rgba(255, 100, 50, ${glowI})`;
-      ctx.fillRect(sx + 3 * s, sy, s * 10, s * 9);
+      if (pulsating) {
+        const glowI = 0.5 + Math.sin(time * 0.006) * 0.4;
+        ctx.fillStyle = isZoziLantern
+          ? `rgba(255, 200, 50, ${glowI})`
+          : `rgba(255, 100, 50, ${glowI})`;
+        ctx.fillRect(sx + 1 * s, sy - 2 * s, s * 14, s * 12);
+      } else {
+        const glowI = 0.3 + Math.sin(time * 0.003 + hash * 0.1) * 0.15;
+        ctx.fillStyle = `rgba(255, 100, 50, ${glowI})`;
+        ctx.fillRect(sx + 3 * s, sy, s * 10, s * 9);
+      }
       ctx.fillStyle = COLORS.lanternPole;
       ctx.fillRect(sx + 4 * s, sy + s, s * 8, s);
       ctx.fillRect(sx + 4 * s, sy + 7 * s, s * 8, s);
@@ -1287,6 +1304,7 @@ export default function Game() {
   const insideHouseRef = useRef(false);
   const savedPosRef = useRef({ x: 0, y: 0 });
   const pickupMsgRef = useRef(0);
+  const pulsatingLanternsRef = useRef<Set<string>>(new Set());
 
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
@@ -1358,6 +1376,25 @@ export default function Game() {
           zoziRevealedRef.current = true;
         }
       }
+      // L key: toggle pulsating on nearby lanterns
+      if ((e.key === "l" || e.key === "L") && started && !insideHouseRef.current) {
+        const px = playerRef.current.x, py = playerRef.current.y;
+        const baseTx = Math.floor(px), baseTy = Math.floor(py);
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const tx = baseTx + dx, ty = baseTy + dy;
+            const dist = Math.abs(px - tx - 0.5) + Math.abs(py - ty - 0.5);
+            if (dist < 1.5 && getTileAt(tx, ty) === TileType.Lantern) {
+              const key = `${tx},${ty}`;
+              if (pulsatingLanternsRef.current.has(key)) {
+                pulsatingLanternsRef.current.delete(key);
+              } else {
+                pulsatingLanternsRef.current.add(key);
+              }
+            }
+          }
+        }
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => {
       keysRef.current.delete(e.key);
@@ -1368,7 +1405,7 @@ export default function Game() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [started, startGame]);
+  }, [started, startGame, getTileAt]);
 
   // Title screen canvas animation
   useEffect(() => {
@@ -1603,7 +1640,8 @@ export default function Game() {
             }
             const screenX = Math.floor(tx * SCALED_TILE - camX);
             const screenY = Math.floor(ty * SCALED_TILE - camY);
-            drawTile(ctx, tileType, screenX, screenY, tx, ty, time);
+            const isPulsating = tileType === TileType.Lantern && pulsatingLanternsRef.current.has(`${tx},${ty}`);
+            drawTile(ctx, tileType, screenX, screenY, tx, ty, time, isPulsating);
           }
         }
 
