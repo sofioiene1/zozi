@@ -1495,25 +1495,78 @@ class ZenAudio {
   playFishingSplash() {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
-    const bufferSize = Math.floor(this.ctx.sampleRate * 0.25);
-    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.2));
+    const rate = this.ctx.sampleRate;
+
+    // Layer 1: initial plop — short, low-frequency thump
+    const plopLen = Math.floor(rate * 0.06);
+    const plopBuf = this.ctx.createBuffer(1, plopLen, rate);
+    const plopData = plopBuf.getChannelData(0);
+    for (let i = 0; i < plopLen; i++) {
+      const t = i / rate;
+      plopData[i] = Math.sin(t * 180 * Math.PI * 2) * Math.exp(-t * 60) * 0.6;
     }
-    const source = this.ctx.createBufferSource();
-    source.buffer = buffer;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = "bandpass";
-    filter.frequency.value = 800 + Math.random() * 400;
-    filter.Q.value = 0.8;
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.08, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.masterGain);
-    source.start(now);
+    const plopSrc = this.ctx.createBufferSource();
+    plopSrc.buffer = plopBuf;
+    const plopFilter = this.ctx.createBiquadFilter();
+    plopFilter.type = "lowpass";
+    plopFilter.frequency.value = 300;
+    const plopGain = this.ctx.createGain();
+    plopGain.gain.setValueAtTime(0.1, now);
+    plopGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    plopSrc.connect(plopFilter);
+    plopFilter.connect(plopGain);
+    plopGain.connect(this.masterGain);
+    plopSrc.start(now);
+
+    // Layer 2: water spray — longer filtered noise with soft attack
+    const sprayLen = Math.floor(rate * 0.4);
+    const sprayBuf = this.ctx.createBuffer(1, sprayLen, rate);
+    const sprayData = sprayBuf.getChannelData(0);
+    for (let i = 0; i < sprayLen; i++) {
+      const t = i / sprayLen;
+      const attack = Math.min(1, t * 20);
+      const decay = Math.exp(-t * 6);
+      sprayData[i] = (Math.random() * 2 - 1) * attack * decay;
+    }
+    const spraySrc = this.ctx.createBufferSource();
+    spraySrc.buffer = sprayBuf;
+    const sprayLow = this.ctx.createBiquadFilter();
+    sprayLow.type = "lowpass";
+    sprayLow.frequency.setValueAtTime(1200, now);
+    sprayLow.frequency.exponentialRampToValueAtTime(400, now + 0.35);
+    const sprayHigh = this.ctx.createBiquadFilter();
+    sprayHigh.type = "highpass";
+    sprayHigh.frequency.value = 150;
+    const sprayGain = this.ctx.createGain();
+    sprayGain.gain.setValueAtTime(0.06, now);
+    sprayGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    spraySrc.connect(sprayLow);
+    sprayLow.connect(sprayHigh);
+    sprayHigh.connect(sprayGain);
+    sprayGain.connect(this.masterGain);
+    spraySrc.start(now + 0.01);
+
+    // Layer 3: gentle ripple tail — very soft, slow noise fade
+    const ripLen = Math.floor(rate * 0.5);
+    const ripBuf = this.ctx.createBuffer(1, ripLen, rate);
+    const ripData = ripBuf.getChannelData(0);
+    for (let i = 0; i < ripLen; i++) {
+      const t = i / ripLen;
+      ripData[i] = (Math.random() * 2 - 1) * Math.exp(-t * 4) * 0.3;
+    }
+    const ripSrc = this.ctx.createBufferSource();
+    ripSrc.buffer = ripBuf;
+    const ripFilter = this.ctx.createBiquadFilter();
+    ripFilter.type = "lowpass";
+    ripFilter.frequency.value = 500;
+    ripFilter.Q.value = 0.5;
+    const ripGain = this.ctx.createGain();
+    ripGain.gain.setValueAtTime(0.04, now + 0.05);
+    ripGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    ripSrc.connect(ripFilter);
+    ripFilter.connect(ripGain);
+    ripGain.connect(this.masterGain);
+    ripSrc.start(now + 0.05);
   }
 
   stop() {
