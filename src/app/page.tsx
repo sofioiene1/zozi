@@ -1394,7 +1394,6 @@ export default function Game() {
   const CHEATS = [
     {
       label: "teleport to golden bamboo",
-      color: "#ffd700",
       action: () => {
         playerRef.current.x = GOLDEN_BAMBOO_POS.x + 0.5;
         playerRef.current.y = GOLDEN_BAMBOO_POS.y + 1.5;
@@ -1403,7 +1402,6 @@ export default function Game() {
     },
     {
       label: "teleport to zozi's house",
-      color: "#c06080",
       action: () => {
         playerRef.current.x = 87.5;
         playerRef.current.y = 69.5;
@@ -1879,7 +1877,7 @@ export default function Game() {
                   padding: "8px 12px",
                   background: i === cheatIndex ? "#2a2a4e" : "transparent",
                   border: "none",
-                  color: cheat.color,
+                  color: i === cheatIndex ? "#ffd700" : "#e0d8c8",
                   fontFamily: "monospace",
                   fontSize: 13,
                   cursor: "pointer",
