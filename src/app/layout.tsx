@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Zozi - A Peaceful Walk",
+  title: "zozi - a peaceful walk",
   description: "A little dude walking through an endless Japanese town",
 };
 

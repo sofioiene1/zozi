@@ -687,43 +687,102 @@ function drawCharacter(
 
 // ─── Title Screen Drawing ───────────────────────────────────────────────────
 
-// Pixel-art brush-stroke letters for "ZOZI"
-const LETTER_Z = [
-  "XXXXXXX",
-  "     XX",
-  "    XX ",
-  "   XX  ",
-  "  XX   ",
-  " XX    ",
-  "XXXXXXX",
+// Lowercase pixel letters for "zozi"
+const LETTER_z = [
+  "      ",
+  "      ",
+  "XXXXXX",
+  "   XX ",
+  "  XX  ",
+  " XX   ",
+  "XXXXXX",
 ];
-const LETTER_O = [
-  " XXXXX ",
-  "XX   XX",
-  "XX   XX",
-  "XX   XX",
-  "XX   XX",
-  "XX   XX",
-  " XXXXX ",
+const LETTER_o = [
+  "      ",
+  "      ",
+  " XXXX ",
+  "XX  XX",
+  "XX  XX",
+  "XX  XX",
+  " XXXX ",
 ];
-const LETTER_I = [
-  "  XXX  ",
-  "   X   ",
-  "   X   ",
-  "   X   ",
-  "   X   ",
-  "   X   ",
-  "  XXX  ",
+const LETTER_i = [
+  "  XX  ",
+  "      ",
+  "  XX  ",
+  "  XX  ",
+  "  XX  ",
+  "  XX  ",
+  "  XX  ",
 ];
 
-function drawTitleZOZI(ctx: CanvasRenderingContext2D, cx: number, cy: number, time: number) {
-  const letters = [LETTER_Z, LETTER_O, LETTER_Z, LETTER_I];
-  const pixSize = 5;
-  const letterW = 7 * pixSize;
-  const gap = pixSize * 3;
+function drawTitleCharacter(ctx: CanvasRenderingContext2D, cx: number, cy: number, time: number) {
+  // Draw the Zozi character sprite as the logo, scaled up
+  const s = 4; // pixel scale for title character
+  const sx = cx - 8 * s;
+  const sy = cy - 10 * s;
+
+  // gentle idle bob
+  const bob = Math.sin(time * 0.002) * 2;
+  const by = Math.floor(bob);
+
+  // sandals
+  ctx.fillStyle = "#8b6f4e";
+  ctx.fillRect(sx + 4 * s, sy + 14 * s, s * 3, s * 2);
+  ctx.fillRect(sx + 9 * s, sy + 14 * s, s * 3, s * 2);
+
+  // legs
+  ctx.fillStyle = "#1a1a3a";
+  ctx.fillRect(sx + 5 * s, sy + 11 * s + by, s * 6, s * 4);
+
+  // kimono
+  ctx.fillStyle = "#3a4a6a";
+  ctx.fillRect(sx + 4 * s, sy + 5 * s + by, s * 8, s * 7);
+  ctx.fillStyle = "#4a5a7a";
+  ctx.fillRect(sx + 6 * s, sy + 5 * s + by, s * 4, s * 5);
+  // obi
+  ctx.fillStyle = "#8b3a3a";
+  ctx.fillRect(sx + 4 * s, sy + 9 * s + by, s * 8, s * 2);
+
+  // arms
+  ctx.fillStyle = "#3a4a6a";
+  ctx.fillRect(sx + 2 * s, sy + 6 * s + by, s * 2, s * 4);
+  ctx.fillRect(sx + 12 * s, sy + 6 * s + by, s * 2, s * 4);
+
+  // head
+  ctx.fillStyle = "#f0d0a0";
+  ctx.fillRect(sx + 5 * s, sy + 0 * s + by, s * 6, s * 6);
+
+  // hair
+  ctx.fillStyle = "#1a1a2a";
+  ctx.fillRect(sx + 4 * s, sy + by, s * 8, s * 2);
+  ctx.fillRect(sx + 4 * s, sy + by, s * 2, s * 5);
+  ctx.fillRect(sx + 10 * s, sy + by, s * 2, s * 5);
+
+  // eyes
+  ctx.fillStyle = "#1a1a2a";
+  ctx.fillRect(sx + 6 * s, sy + 3 * s + by, s, s);
+  ctx.fillRect(sx + 9 * s, sy + 3 * s + by, s, s);
+
+  // straw hat
+  ctx.fillStyle = "#d4b878";
+  ctx.fillRect(sx + 2 * s, sy - 2 * s + by, s * 12, s * 2);
+  ctx.fillStyle = "#c4a868";
+  ctx.fillRect(sx + 4 * s, sy - 3 * s + by, s * 8, s);
+  ctx.fillStyle = "#b49858";
+  ctx.fillRect(sx + 6 * s, sy - 4 * s + by, s * 4, s);
+  ctx.fillStyle = "#8b3a3a";
+  ctx.fillRect(sx + 2 * s, sy - s + by, s * 12, s);
+}
+
+function drawTitleText(ctx: CanvasRenderingContext2D, cx: number, cy: number, time: number) {
+  const letters = [LETTER_z, LETTER_o, LETTER_z, LETTER_i];
+  const pixSize = 4;
+  const letterW = 6 * pixSize;
+  const gap = pixSize * 2;
   const totalW = letters.length * letterW + (letters.length - 1) * gap;
   let startX = cx - totalW / 2;
-  const startY = cy - (7 * pixSize) / 2;
+  const startY = cy;
 
   for (let li = 0; li < letters.length; li++) {
     const letter = letters[li];
@@ -732,7 +791,6 @@ function drawTitleZOZI(ctx: CanvasRenderingContext2D, cx: number, cy: number, ti
         if (letter[row][col] === "X") {
           const px = startX + col * pixSize;
           const py = startY + row * pixSize;
-          // subtle per-pixel shimmer
           const shimmer = Math.sin(time * 0.002 + li * 1.5 + row * 0.3 + col * 0.5) * 0.08;
           const base = 0.82 + shimmer;
           const r = Math.floor(212 * base);
@@ -740,7 +798,6 @@ function drawTitleZOZI(ctx: CanvasRenderingContext2D, cx: number, cy: number, ti
           const b = Math.floor(120 * base);
           ctx.fillStyle = `rgb(${r},${g},${b})`;
           ctx.fillRect(px, py, pixSize, pixSize);
-          // slight brush edge
           ctx.fillStyle = `rgba(180, 152, 88, ${0.3 + shimmer})`;
           ctx.fillRect(px + pixSize - 1, py, 1, pixSize);
           ctx.fillRect(px, py + pixSize - 1, pixSize, 1);
@@ -1025,15 +1082,18 @@ export default function Game() {
         if (titlePetals[i].life <= 0) titlePetals.splice(i, 1);
       }
 
-      // Draw ZOZI pixel title
-      drawTitleZOZI(ctx, w / 2, h / 2 - 20, time);
+      // Draw Zozi character as logo
+      drawTitleCharacter(ctx, w / 2, h / 2 - 50, time);
+
+      // Draw "zozi" lowercase pixel text below character
+      drawTitleText(ctx, w / 2, h / 2 + 30, time);
 
       // Subtle prompt text
       const pulse = 0.3 + Math.sin(time * 0.003) * 0.15;
       ctx.fillStyle = `rgba(106, 106, 90, ${pulse})`;
       ctx.font = "11px monospace";
       ctx.textAlign = "center";
-      ctx.fillText("press any arrow key to begin", w / 2, h / 2 + 50);
+      ctx.fillText("press any arrow key to begin", w / 2, h / 2 + 72);
 
       // vignette
       const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.25, w / 2, h / 2, w * 0.65);
