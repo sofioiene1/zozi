@@ -62,6 +62,122 @@ const HOUSE_PALETTES = [
   { wallBase: "#e0d4bc", wallDark: "#c4b89c", wallLight: "#f4ead0", roofDark: "#3a2d5a", roofMid: "#4a3d6a", roofLight: "#5a487a" },
 ];
 
+// ─── Golden Bamboo & Zozi's House ─────────────────────────────────────────
+
+const GOLDEN_BAMBOO_POS = { x: 54, y: 52 };
+const ZOZI_HOUSE_ORIGIN = { x: 84, y: 63 };
+const ZOZI_DOOR_KEYS = new Set(["87,68", "88,68"]);
+const ZOZI_BLOCK = { bx: Math.floor(84 / 16), by: Math.floor(63 / 12) };
+const ZOZI_PALETTE = {
+  wallBase: "#f0e8d0", wallDark: "#d4c4a0", wallLight: "#fff4e0",
+  roofDark: "#b8860b", roofMid: "#d4a017", roofLight: "#ffd700",
+};
+
+interface OverlayTile { type: TileType; solid: boolean }
+
+function isRoadTile(wx: number, wy: number): boolean {
+  return ((wy % 12) + 12) % 12 < 2 || ((wx % 16) + 16) % 16 < 2;
+}
+
+function buildInitialOverlay(): Map<string, OverlayTile> {
+  const m = new Map<string, OverlayTile>();
+  // Bamboo park: open grove with scattered bamboo around golden bamboo
+  // Garden floor throughout so the player can walk freely
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const px = GOLDEN_BAMBOO_POS.x + dx;
+      const py = GOLDEN_BAMBOO_POS.y + dy;
+      if (isRoadTile(px, py)) continue; // don't cover roads
+      m.set(`${px},${py}`, { type: TileType.Garden, solid: false });
+    }
+  }
+  // Scattered bamboo — placed at corners and edges, leaving clear paths
+  const bambooSpots = [
+    [-3, -3], [-3, -1], [-3, 2], [-3, 3],
+    [3, -3], [3, -1], [3, 2], [3, 3],
+    [-1, -3], [2, -3],
+    [-1, 3], [2, 3],
+    [-2, -2], [2, -2], [-2, 2], [2, 2],
+  ];
+  for (const [dx, dy] of bambooSpots) {
+    const px = GOLDEN_BAMBOO_POS.x + dx;
+    const py = GOLDEN_BAMBOO_POS.y + dy;
+    if (isRoadTile(px, py)) continue; // don't block roads
+    m.set(`${px},${py}`, { type: TileType.Bamboo, solid: true });
+  }
+  m.set(`${GOLDEN_BAMBOO_POS.x},${GOLDEN_BAMBOO_POS.y}`, { type: TileType.GoldenBamboo, solid: false });
+  return m;
+}
+
+function revealZoziPath(overlay: Map<string, OverlayTile>) {
+  const yb = (): OverlayTile => ({ type: TileType.YellowBrick, solid: false });
+  // Yellow brick road: follows existing streets (2 tiles wide to fill roads)
+  // 1. Connector from bamboo park north to road (2 tiles wide)
+  for (let y = GOLDEN_BAMBOO_POS.y; y >= 48; y--) {
+    overlay.set(`${GOLDEN_BAMBOO_POS.x},${y}`, yb());
+    overlay.set(`${GOLDEN_BAMBOO_POS.x + 1},${y}`, yb());
+  }
+  // 2. East on horizontal road y=48,49 (full 2-tile road width)
+  for (let x = GOLDEN_BAMBOO_POS.x; x <= 81; x++) {
+    overlay.set(`${x},48`, yb());
+    overlay.set(`${x},49`, yb());
+  }
+  // 3. South on vertical road x=80,81 (full 2-tile road width)
+  for (let y = 48; y <= 73; y++) {
+    overlay.set(`80,${y}`, yb());
+    overlay.set(`81,${y}`, yb());
+  }
+  // 4. East on horizontal road y=72,73 (full 2-tile road width)
+  for (let x = 80; x <= 88; x++) {
+    overlay.set(`${x},72`, yb());
+    overlay.set(`${x},73`, yb());
+  }
+  // 5. Connector from road north to house door (2 tiles wide, matching door)
+  for (let y = 71; y >= 69; y--) {
+    overlay.set(`87,${y}`, yb());
+    overlay.set(`88,${y}`, yb());
+  }
+  // Zozi's house structure (8×6)
+  for (let dy = 0; dy < 6; dy++) {
+    for (let dx = 0; dx < 8; dx++) {
+      const wx = ZOZI_HOUSE_ORIGIN.x + dx, wy = ZOZI_HOUSE_ORIGIN.y + dy;
+      const key = `${wx},${wy}`;
+      if (dy < 2) overlay.set(key, { type: TileType.HouseRoof, solid: true });
+      else if (dy === 5 && (dx === 3 || dx === 4)) overlay.set(key, { type: TileType.HouseDoor, solid: false });
+      else overlay.set(key, { type: TileType.HouseWall, solid: true });
+    }
+  }
+  // Lanterns
+  overlay.set("83,64", { type: TileType.Lantern, solid: true });
+  overlay.set("92,64", { type: TileType.Lantern, solid: true });
+}
+
+// ─── Interior Room Layout ────────────────────────────────────────────────
+
+const ROOM_W = 12;
+const ROOM_H = 10;
+// 0=tatami 1=wall 2=exit 3=table 4=cushion 5=futon 6=tokonoma 7=shoji
+const ROOM_LAYOUT = [
+  [1,1,1,7,7,1,1,7,7,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,6,6,0,1],
+  [1,0,0,3,3,0,0,0,0,0,0,1],
+  [1,0,4,3,3,4,0,0,0,0,0,1],
+  [1,0,0,3,3,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,5,5,0,0,1],
+  [1,0,0,0,0,0,0,5,5,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,2,2,1,1,1,1,1],
+];
+const ROOM_SOLID = new Set([1, 3, 6, 7]);
+
+function isRoomSolid(rx: number, ry: number): boolean {
+  const ix = Math.floor(rx), iy = Math.floor(ry);
+  if (ix < 0 || ix >= ROOM_W || iy < 0 || iy >= ROOM_H) return true;
+  return ROOM_SOLID.has(ROOM_LAYOUT[iy][ix]);
+}
+
 // ─── Seeded Random ──────────────────────────────────────────────────────────
 
 function seededRandom(seed: number) {
@@ -98,11 +214,13 @@ const enum TileType {
   Bush,
   Garden,
   Empty,
+  GoldenBamboo,
+  YellowBrick,
 }
 
 // Helper: is walkable surface "stone-like"?
 function isStoneSurface(t: TileType): boolean {
-  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden;
+  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden || t === TileType.YellowBrick;
 }
 
 // ─── World Generation ───────────────────────────────────────────────────────
@@ -328,6 +446,7 @@ function generateChunk(cx: number, cy: number): Chunk {
 function getHousePalette(worldX: number, worldY: number) {
   const bx = Math.floor(worldX / 16);
   const by = Math.floor(worldY / 12);
+  if (bx === ZOZI_BLOCK.bx && by === ZOZI_BLOCK.by) return ZOZI_PALETTE;
   const idx = Math.abs(hashCoord(bx * 11 + 5, by * 17 + 3)) % HOUSE_PALETTES.length;
   return HOUSE_PALETTES[idx];
 }
@@ -601,6 +720,45 @@ function drawTile(
       break;
     }
 
+    case TileType.GoldenBamboo: {
+      ctx.fillStyle = COLORS.grass1;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      const glow = 0.5 + Math.sin(time * 0.003) * 0.3;
+      ctx.fillStyle = `rgba(255,215,0,${glow * 0.12})`;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#d4a017";
+      ctx.fillRect(sx + 6 * s, sy, s * 3, SCALED_TILE);
+      ctx.fillStyle = "#b8860b";
+      ctx.fillRect(sx + 6 * s, sy + 5 * s, s * 3, s);
+      ctx.fillRect(sx + 6 * s, sy + 11 * s, s * 3, s);
+      ctx.fillStyle = "#ffd700";
+      ctx.fillRect(sx + 7 * s, sy, s, SCALED_TILE);
+      ctx.fillStyle = "#d4a017";
+      ctx.fillRect(sx + 3 * s, sy + s, s * 4, s * 2);
+      ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 5, s * 2);
+      ctx.fillStyle = `rgba(255,223,0,${glow * 0.2})`;
+      ctx.fillRect(sx + 2 * s, sy + 2 * s, s * 12, s * 12);
+      break;
+    }
+
+    case TileType.YellowBrick: {
+      ctx.fillStyle = "#d4a017";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      for (let ry = 0; ry < 16; ry += 4) {
+        ctx.fillStyle = "#c4941a";
+        for (let rx = (ry % 8 === 0 ? 0 : 4); rx < 16; rx += 8) {
+          ctx.fillRect(sx + rx * s, sy + ry * s, s * 7, s * 3);
+        }
+        ctx.fillStyle = "#b8860b";
+        ctx.fillRect(sx, sy + ry * s + 3 * s, SCALED_TILE, s);
+      }
+      if (Math.sin(time * 0.005 + hash) > 0.7) {
+        ctx.fillStyle = "rgba(255,255,200,0.4)";
+        ctx.fillRect(sx + (Math.abs(hash) % 10 + 3) * s, sy + (Math.abs(hash >> 4) % 10 + 3) * s, s * 2, s * 2);
+      }
+      break;
+    }
+
     default:
       ctx.fillStyle = "#333";
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
@@ -617,7 +775,8 @@ function drawCharacter(
   sy: number,
   dir: Direction,
   frame: number,
-  _time: number
+  _time: number,
+  hasGoldenBamboo = false
 ) {
   const s = SCALE;
   const f = frame % 4;
@@ -699,6 +858,33 @@ function drawCharacter(
   ctx.fillRect(sx + 6 * s, sy - 4 * s + bob, s * 4, s);
   ctx.fillStyle = "#8b3a3a";
   ctx.fillRect(sx + 2 * s, sy - s + bob, s * 12, s);
+
+  // golden bamboo in hand
+  if (hasGoldenBamboo) {
+    const armSwing = f % 2 === 0 ? 0 : s;
+    let bx: number, by: number;
+    if (dir === "left") {
+      bx = sx + 1 * s;
+      by = sy + 2 * s + bob + armSwing;
+    } else if (dir === "right") {
+      bx = sx + 13 * s;
+      by = sy + 2 * s + bob + (f % 2 === 0 ? s : 0);
+    } else {
+      bx = sx + 13 * s;
+      by = sy + 2 * s + bob;
+    }
+    // bamboo stalk
+    ctx.fillStyle = "#d4a017";
+    ctx.fillRect(bx, by, s, s * 10);
+    // highlight
+    ctx.fillStyle = "#ffd700";
+    ctx.fillRect(bx, by, s, s * 2);
+    ctx.fillRect(bx, by + s * 5, s, s);
+    // nodes
+    ctx.fillStyle = "#b8860b";
+    ctx.fillRect(bx, by + s * 3, s, s);
+    ctx.fillRect(bx, by + s * 7, s, s);
+  }
 }
 
 // ─── Title Screen Drawing ───────────────────────────────────────────────────
@@ -822,6 +1008,118 @@ function drawTitleText(ctx: CanvasRenderingContext2D, cx: number, cy: number, ti
     }
     startX += letterW + gap;
   }
+}
+
+// ─── Interior Drawing ───────────────────────────────────────────────────────
+
+function drawInterior(
+  ctx: CanvasRenderingContext2D, w: number, h: number,
+  px: number, py: number, dir: Direction, frame: number, time: number
+) {
+  const tileSize = SCALED_TILE;
+  const offX = (w - ROOM_W * tileSize) / 2;
+  const offY = (h - ROOM_H * tileSize) / 2;
+  const s = SCALE;
+
+  ctx.fillStyle = "#1a1a2e";
+  ctx.fillRect(0, 0, w, h);
+
+  for (let ry = 0; ry < ROOM_H; ry++) {
+    for (let rx = 0; rx < ROOM_W; rx++) {
+      const sx = offX + rx * tileSize;
+      const sy = offY + ry * tileSize;
+      const cell = ROOM_LAYOUT[ry][rx];
+
+      if (cell === 0 || cell === 4 || cell === 5 || cell === 3 || cell === 2) {
+        // tatami base
+        ctx.fillStyle = "#c4a060";
+        ctx.fillRect(sx, sy, tileSize, tileSize);
+        ctx.fillStyle = "#b89850";
+        for (let ty = 0; ty < 16; ty += 2) ctx.fillRect(sx, sy + ty * s, tileSize, s);
+        ctx.fillStyle = "#a08840";
+        ctx.fillRect(sx, sy, s, tileSize);
+        ctx.fillRect(sx, sy, tileSize, s);
+      }
+
+      if (cell === 1) { // wall
+        ctx.fillStyle = "#8b7355";
+        ctx.fillRect(sx, sy, tileSize, tileSize);
+        ctx.fillStyle = "#f5e6c8";
+        ctx.fillRect(sx + 2 * s, sy + 2 * s, tileSize - 4 * s, tileSize - 4 * s);
+        ctx.fillStyle = "#7a6345";
+        ctx.fillRect(sx + s, sy + s, tileSize - 2 * s, s);
+        ctx.fillRect(sx + s, sy + s, s, tileSize - 2 * s);
+      } else if (cell === 2) { // exit door
+        ctx.fillStyle = "#5a3a2a";
+        ctx.fillRect(sx + 2 * s, sy + 2 * s, tileSize - 4 * s, tileSize - 4 * s);
+        ctx.fillStyle = "#d4a017";
+        ctx.fillRect(sx + 6 * s, sy + 6 * s, s * 3, s * 3);
+      } else if (cell === 3) { // table
+        ctx.fillStyle = "#6b4e38";
+        ctx.fillRect(sx + s, sy + 2 * s, 14 * s, 12 * s);
+        ctx.fillStyle = "#8b6f4e";
+        ctx.fillRect(sx + 2 * s, sy + 3 * s, 12 * s, 10 * s);
+      } else if (cell === 4) { // cushion
+        ctx.fillStyle = "#8b3a3a";
+        ctx.fillRect(sx + 3 * s, sy + 3 * s, 10 * s, 10 * s);
+        ctx.fillStyle = "#a04848";
+        ctx.fillRect(sx + 4 * s, sy + 4 * s, 8 * s, 8 * s);
+      } else if (cell === 5) { // futon
+        ctx.fillStyle = "#e8e0d0";
+        ctx.fillRect(sx + s, sy + s, 14 * s, 14 * s);
+        ctx.fillStyle = "#d4c4b0";
+        ctx.fillRect(sx + 2 * s, sy + 2 * s, 12 * s, 4 * s);
+        ctx.fillStyle = "#3a4a6a";
+        ctx.fillRect(sx + 2 * s, sy + 7 * s, 12 * s, 8 * s);
+      } else if (cell === 6) { // tokonoma
+        ctx.fillStyle = "#6b5238";
+        ctx.fillRect(sx, sy, tileSize, tileSize);
+        ctx.fillStyle = "#f5e6c8";
+        ctx.fillRect(sx + 4 * s, sy + s, 8 * s, 12 * s);
+        ctx.fillStyle = "#1a1a2a";
+        ctx.fillRect(sx + 6 * s, sy + 3 * s, 4 * s, s);
+        ctx.fillRect(sx + 7 * s, sy + 5 * s, 2 * s, s);
+        ctx.fillRect(sx + 5 * s, sy + 7 * s, 6 * s, s);
+      } else if (cell === 7) { // shoji screen
+        ctx.fillStyle = "#c4a868";
+        ctx.fillRect(sx, sy, tileSize, tileSize);
+        ctx.fillStyle = "#f5edd8";
+        ctx.fillRect(sx + s, sy + s, 14 * s, 14 * s);
+        ctx.fillStyle = "#c4a868";
+        ctx.fillRect(sx + 7 * s, sy, s * 2, tileSize);
+        ctx.fillRect(sx, sy + 7 * s, tileSize, s * 2);
+        const sg = 0.08 + Math.sin(time * 0.001) * 0.04;
+        ctx.fillStyle = `rgba(100,180,100,${sg})`;
+        ctx.fillRect(sx + s, sy + s, 14 * s, 14 * s);
+      }
+    }
+  }
+
+  // Tea set on table
+  const tsx = offX + 3 * tileSize + 4 * s, tsy = offY + 3 * tileSize + 5 * s;
+  ctx.fillStyle = "#e8e0d0";
+  ctx.fillRect(tsx, tsy, s * 4, s * 3);
+  ctx.fillStyle = "#c4b4a0";
+  ctx.fillRect(tsx + s, tsy + s, s * 2, s);
+  ctx.fillStyle = "#e8e0d0";
+  ctx.fillRect(tsx + 6 * s, tsy, s * 2, s * 2);
+  ctx.fillRect(tsx + 9 * s, tsy + s, s * 2, s * 2);
+
+  // Character
+  const csx = offX + px * tileSize - 8 * s;
+  const csy = offY + py * tileSize - 8 * s;
+  drawCharacter(ctx, csx, csy, dir, frame, time);
+
+  // Warm interior vignette
+  const g = ctx.createRadialGradient(w / 2, h / 2, w * 0.2, w / 2, h / 2, w * 0.5);
+  g.addColorStop(0, "rgba(0,0,0,0)");
+  g.addColorStop(1, "rgba(0,0,0,0.5)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  // Warm ambient glow
+  ctx.fillStyle = "rgba(255,200,100,0.03)";
+  ctx.fillRect(0, 0, w, h);
 }
 
 // ─── Falling Petals ─────────────────────────────────────────────────────────
@@ -983,6 +1281,12 @@ export default function Game() {
   const walkTimerRef = useRef(0);
   const petalsRef = useRef<Petal[]>([]);
   const lastStepRef = useRef(0);
+  const overlayRef = useRef<Map<string, OverlayTile>>(buildInitialOverlay());
+  const hasGoldenBambooRef = useRef(false);
+  const zoziRevealedRef = useRef(false);
+  const insideHouseRef = useRef(false);
+  const savedPosRef = useRef({ x: 0, y: 0 });
+  const pickupMsgRef = useRef(0);
 
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
@@ -996,6 +1300,9 @@ export default function Game() {
 
   const isSolid = useCallback(
     (worldX: number, worldY: number): boolean => {
+      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
+      const ov = overlayRef.current.get(key);
+      if (ov !== undefined) return ov.solid;
       const cx = Math.floor(worldX / CHUNK_SIZE);
       const cy = Math.floor(worldY / CHUNK_SIZE);
       const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
@@ -1008,6 +1315,9 @@ export default function Game() {
 
   const getTileAt = useCallback(
     (worldX: number, worldY: number): TileType => {
+      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
+      const ov = overlayRef.current.get(key);
+      if (ov !== undefined) return ov.type;
       const cx = Math.floor(worldX / CHUNK_SIZE);
       const cy = Math.floor(worldY / CHUNK_SIZE);
       const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
@@ -1035,6 +1345,18 @@ export default function Game() {
       // Start game on movement key press
       if (moveKeys.has(e.key) && !started) {
         startGame();
+      }
+      // Spacebar: pick up golden bamboo if nearby
+      if (e.key === " " && started && !hasGoldenBambooRef.current && !insideHouseRef.current) {
+        const px = playerRef.current.x, py = playerRef.current.y;
+        const dist = Math.abs(px - GOLDEN_BAMBOO_POS.x - 0.5) + Math.abs(py - GOLDEN_BAMBOO_POS.y - 0.5);
+        if (dist < 2) {
+          hasGoldenBambooRef.current = true;
+          pickupMsgRef.current = performance.now();
+          overlayRef.current.delete(`${GOLDEN_BAMBOO_POS.x},${GOLDEN_BAMBOO_POS.y}`);
+          revealZoziPath(overlayRef.current);
+          zoziRevealedRef.current = true;
+        }
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -1161,117 +1483,183 @@ export default function Game() {
 
       movingRef.current = dx !== 0 || dy !== 0;
 
-      if (movingRef.current) {
-        if (dx !== 0 && dy !== 0) {
-          dx *= 0.707;
-          dy *= 0.707;
+      if (insideHouseRef.current) {
+        // ── Interior mode ──
+        if (movingRef.current) {
+          if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+          const nx = playerRef.current.x + dx * MOVE_SPEED;
+          const ny = playerRef.current.y + dy * MOVE_SPEED;
+          const R = 0.3;
+          const rpx = playerRef.current.x, rpy = playerRef.current.y;
+          if (!isRoomSolid(rpx - R, ny - R) && !isRoomSolid(rpx + R, ny - R) &&
+              !isRoomSolid(rpx - R, ny + R) && !isRoomSolid(rpx + R, ny + R))
+            playerRef.current.y = ny;
+          const rfy = playerRef.current.y;
+          if (!isRoomSolid(nx - R, rfy - R) && !isRoomSolid(nx + R, rfy - R) &&
+              !isRoomSolid(nx - R, rfy + R) && !isRoomSolid(nx + R, rfy + R))
+            playerRef.current.x = nx;
+          walkTimerRef.current += 1;
+          if (walkTimerRef.current >= 8) { walkTimerRef.current = 0; frameRef.current += 1; }
+          if (time - lastStepRef.current > 280) {
+            lastStepRef.current = time;
+            audioRef.current?.playFootstep("stone");
+          }
+        } else { walkTimerRef.current = 0; frameRef.current = 0; }
+        // Exit check
+        if (playerRef.current.y > 9.2) {
+          insideHouseRef.current = false;
+          playerRef.current.x = savedPosRef.current.x;
+          playerRef.current.y = savedPosRef.current.y;
         }
-        const nx = playerRef.current.x + dx * MOVE_SPEED;
-        const ny = playerRef.current.y + dy * MOVE_SPEED;
-
-        const R = 0.3;
-        const px = playerRef.current.x;
-        const py = playerRef.current.y;
-
-        const canMoveY = !isSolid(Math.floor(px - R), Math.floor(ny - R)) &&
-          !isSolid(Math.floor(px + R), Math.floor(ny - R)) &&
-          !isSolid(Math.floor(px - R), Math.floor(ny + R)) &&
-          !isSolid(Math.floor(px + R), Math.floor(ny + R));
-        if (canMoveY) playerRef.current.y = ny;
-
-        const fy = playerRef.current.y;
-        const canMoveX = !isSolid(Math.floor(nx - R), Math.floor(fy - R)) &&
-          !isSolid(Math.floor(nx + R), Math.floor(fy - R)) &&
-          !isSolid(Math.floor(nx - R), Math.floor(fy + R)) &&
-          !isSolid(Math.floor(nx + R), Math.floor(fy + R));
-        if (canMoveX) playerRef.current.x = nx;
-
-        // walk animation
-        walkTimerRef.current += 1;
-        if (walkTimerRef.current >= 8) {
-          walkTimerRef.current = 0;
-          frameRef.current += 1;
-        }
-
-        // footsteps — surface-aware
-        if (time - lastStepRef.current > 280) {
-          lastStepRef.current = time;
-          const tile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
-          const surface: Surface = isStoneSurface(tile) ? "stone" : "grass";
-          audioRef.current?.playFootstep(surface);
-        }
+        // Render interior
+        ctx.imageSmoothingEnabled = false;
+        drawInterior(ctx, w, h, playerRef.current.x, playerRef.current.y,
+          dirRef.current, frameRef.current, time);
       } else {
-        walkTimerRef.current = 0;
-        frameRef.current = 0;
-      }
+        // ── Overworld mode ──
+        if (movingRef.current) {
+          if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+          const nx = playerRef.current.x + dx * MOVE_SPEED;
+          const ny = playerRef.current.y + dy * MOVE_SPEED;
+          const R = 0.3;
+          const px = playerRef.current.x, py = playerRef.current.y;
+          if (!isSolid(Math.floor(px - R), Math.floor(ny - R)) &&
+              !isSolid(Math.floor(px + R), Math.floor(ny - R)) &&
+              !isSolid(Math.floor(px - R), Math.floor(ny + R)) &&
+              !isSolid(Math.floor(px + R), Math.floor(ny + R)))
+            playerRef.current.y = ny;
+          const fy = playerRef.current.y;
+          if (!isSolid(Math.floor(nx - R), Math.floor(fy - R)) &&
+              !isSolid(Math.floor(nx + R), Math.floor(fy - R)) &&
+              !isSolid(Math.floor(nx - R), Math.floor(fy + R)) &&
+              !isSolid(Math.floor(nx + R), Math.floor(fy + R)))
+            playerRef.current.x = nx;
+          walkTimerRef.current += 1;
+          if (walkTimerRef.current >= 8) { walkTimerRef.current = 0; frameRef.current += 1; }
+          if (time - lastStepRef.current > 280) {
+            lastStepRef.current = time;
+            const tile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
+            const surface: Surface = isStoneSurface(tile) ? "stone" : "grass";
+            audioRef.current?.playFootstep(surface);
+          }
+        } else { walkTimerRef.current = 0; frameRef.current = 0; }
 
-      // ── Petals ──
-      if (Math.random() < 0.03) {
-        petalsRef.current.push({
-          x: playerRef.current.x + (Math.random() - 0.5) * 20,
-          y: playerRef.current.y - 8 + Math.random() * 2,
-          vx: -0.005 + Math.random() * 0.01,
-          vy: 0.005 + Math.random() * 0.008,
-          life: 300 + Math.random() * 200,
-          size: 1 + Math.random(),
-        });
-      }
-      for (const p of petalsRef.current) {
-        p.x += p.vx + Math.sin(time * 0.001 + p.x) * 0.003;
-        p.y += p.vy;
-        p.life--;
-      }
-      petalsRef.current = petalsRef.current.filter((p) => p.life > 0);
+        // Check house entry
+        if (zoziRevealedRef.current) {
+          const pk = `${Math.floor(playerRef.current.x)},${Math.floor(playerRef.current.y)}`;
+          if (ZOZI_DOOR_KEYS.has(pk)) {
+            savedPosRef.current = { x: playerRef.current.x, y: playerRef.current.y };
+            insideHouseRef.current = true;
+            playerRef.current.x = 5.5;
+            playerRef.current.y = 8.5;
+            dirRef.current = "up";
+          }
+        }
 
-      // ── Render ──
-      ctx.imageSmoothingEnabled = false;
+        // ── Petals ──
+        if (Math.random() < 0.03) {
+          petalsRef.current.push({
+            x: playerRef.current.x + (Math.random() - 0.5) * 20,
+            y: playerRef.current.y - 8 + Math.random() * 2,
+            vx: -0.005 + Math.random() * 0.01,
+            vy: 0.005 + Math.random() * 0.008,
+            life: 300 + Math.random() * 200,
+            size: 1 + Math.random(),
+          });
+        }
+        for (const p of petalsRef.current) {
+          p.x += p.vx + Math.sin(time * 0.001 + p.x) * 0.003;
+          p.y += p.vy;
+          p.life--;
+        }
+        petalsRef.current = petalsRef.current.filter((p) => p.life > 0);
 
-      const camX = playerRef.current.x * SCALED_TILE - w / 2;
-      const camY = playerRef.current.y * SCALED_TILE - h / 2;
+        // ── Render overworld ──
+        ctx.imageSmoothingEnabled = false;
+        const camX = playerRef.current.x * SCALED_TILE - w / 2;
+        const camY = playerRef.current.y * SCALED_TILE - h / 2;
+        ctx.fillStyle = "#1a1a2e";
+        ctx.fillRect(0, 0, w, h);
 
-      ctx.fillStyle = "#1a1a2e";
-      ctx.fillRect(0, 0, w, h);
+        const startTileX = Math.floor(camX / SCALED_TILE) - 1;
+        const startTileY = Math.floor(camY / SCALED_TILE) - 1;
+        const endTileX = Math.ceil((camX + w) / SCALED_TILE) + 1;
+        const endTileY = Math.ceil((camY + h) / SCALED_TILE) + 1;
 
-      const startTileX = Math.floor(camX / SCALED_TILE) - 1;
-      const startTileY = Math.floor(camY / SCALED_TILE) - 1;
-      const endTileX = Math.ceil((camX + w) / SCALED_TILE) + 1;
-      const endTileY = Math.ceil((camY + h) / SCALED_TILE) + 1;
+        for (let ty = startTileY; ty <= endTileY; ty++) {
+          for (let tx = startTileX; tx <= endTileX; tx++) {
+            const ovKey = `${tx},${ty}`;
+            const ov = overlayRef.current.get(ovKey);
+            let tileType: TileType;
+            if (ov) {
+              tileType = ov.type;
+            } else {
+              const chunkX = Math.floor(tx / CHUNK_SIZE);
+              const chunkY = Math.floor(ty / CHUNK_SIZE);
+              const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+              const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+              const chunk = getChunk(chunkX, chunkY);
+              tileType = chunk.tiles[ly][lx];
+            }
+            const screenX = Math.floor(tx * SCALED_TILE - camX);
+            const screenY = Math.floor(ty * SCALED_TILE - camY);
+            drawTile(ctx, tileType, screenX, screenY, tx, ty, time);
+          }
+        }
 
-      for (let ty = startTileY; ty <= endTileY; ty++) {
-        for (let tx = startTileX; tx <= endTileX; tx++) {
-          const chunkX = Math.floor(tx / CHUNK_SIZE);
-          const chunkY = Math.floor(ty / CHUNK_SIZE);
-          const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-          const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-          const chunk = getChunk(chunkX, chunkY);
-          const screenX = Math.floor(tx * SCALED_TILE - camX);
-          const screenY = Math.floor(ty * SCALED_TILE - camY);
-          drawTile(ctx, chunk.tiles[ly][lx], screenX, screenY, tx, ty, time);
+        // character
+        const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
+        const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
+        drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current);
+
+        // golden bamboo pickup message
+        if (pickupMsgRef.current > 0 && time - pickupMsgRef.current < 3000) {
+          const msgAlpha = Math.max(0, 1 - (time - pickupMsgRef.current) / 3000);
+          ctx.globalAlpha = msgAlpha;
+          ctx.fillStyle = "#ffd700";
+          ctx.font = "bold 16px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("✨ golden bamboo found! follow the golden road... ✨", w / 2, 40);
+          ctx.globalAlpha = 1;
+        }
+
+        // bamboo indicator when held
+        if (hasGoldenBambooRef.current) {
+          ctx.fillStyle = "#ffd700";
+          ctx.fillRect(w - 30, 10, 6, 20);
+          ctx.fillStyle = "#d4a017";
+          ctx.fillRect(w - 29, 10, 4, 20);
+        }
+
+        // petals
+        ctx.fillStyle = COLORS.petal;
+        for (const p of petalsRef.current) {
+          const ppx = Math.floor(p.x * SCALED_TILE - camX);
+          const ppy = Math.floor(p.y * SCALED_TILE - camY);
+          const alpha = Math.min(1, p.life / 50);
+          ctx.globalAlpha = alpha * 0.8;
+          ctx.fillRect(ppx, ppy, p.size * SCALE, p.size * SCALE * 0.6);
+        }
+        ctx.globalAlpha = 1;
+
+        // vignette
+        const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
+        gradient.addColorStop(0, "rgba(0,0,0,0)");
+        gradient.addColorStop(1, "rgba(0,0,0,0.4)");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, w, h);
+
+        // dev coordinates
+        if (process.env.NODE_ENV === "development") {
+          ctx.fillStyle = "rgba(255,255,255,0.4)";
+          ctx.font = "11px monospace";
+          ctx.textAlign = "right";
+          ctx.fillText(
+            `x: ${playerRef.current.x.toFixed(1)}  y: ${playerRef.current.y.toFixed(1)}`,
+            w - 10, h - 10
+          );
         }
       }
-
-      // character
-      const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
-      const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
-      drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time);
-
-      // petals
-      ctx.fillStyle = COLORS.petal;
-      for (const p of petalsRef.current) {
-        const ppx = Math.floor(p.x * SCALED_TILE - camX);
-        const ppy = Math.floor(p.y * SCALED_TILE - camY);
-        const alpha = Math.min(1, p.life / 50);
-        ctx.globalAlpha = alpha * 0.8;
-        ctx.fillRect(ppx, ppy, p.size * SCALE, p.size * SCALE * 0.6);
-      }
-      ctx.globalAlpha = 1;
-
-      // vignette
-      const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
-      gradient.addColorStop(0, "rgba(0,0,0,0)");
-      gradient.addColorStop(1, "rgba(0,0,0,0.4)");
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, w, h);
     };
 
     animFrame = requestAnimationFrame(loop);
