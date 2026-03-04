@@ -1020,6 +1020,26 @@ function findNearestWater(
   return best;
 }
 
+function findWaterTilesInRadius(
+  px: number, py: number,
+  radius: number,
+  getTile: (wx: number, wy: number) => TileType
+): { x: number; y: number }[] {
+  const baseTx = Math.floor(px);
+  const baseTy = Math.floor(py);
+  const result: { x: number; y: number }[] = [];
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const tx = baseTx + dx;
+      const ty = baseTy + dy;
+      if (getTile(tx, ty) === TileType.Water) {
+        result.push({ x: tx, y: ty });
+      }
+    }
+  }
+  return result;
+}
+
 function drawPixelFish(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, color: string, time: number
@@ -1036,6 +1056,46 @@ function drawPixelFish(
   // eye
   ctx.fillStyle = "#111";
   ctx.fillRect(cx + s * 2, cy - s, s, s);
+}
+
+function drawKoi(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  color: string, accentColor: string,
+  time: number, phase: number,
+  size: number, facingLeft: boolean
+) {
+  const s = SCALE * size;
+  const dir = facingLeft ? -1 : 1;
+  const tailFlop = Math.sin(time * 0.012 + phase) * s;
+  // body
+  ctx.fillStyle = color;
+  ctx.fillRect(cx - dir * s * 3, cy - s, s * 6, s * 2);
+  // accent patches
+  ctx.fillStyle = accentColor;
+  ctx.fillRect(cx - dir * s, cy - s, s * 2, s * 2);
+  // head
+  ctx.fillStyle = color;
+  ctx.fillRect(cx + dir * s * 3, cy - s, s, s * 2);
+  // tail
+  ctx.fillRect(cx - dir * s * 4, cy - s * 1.5 + tailFlop, s, s * 3);
+  // eye
+  ctx.fillStyle = "#111";
+  ctx.fillRect(cx + dir * s * 2.5, cy - s * 0.5, s * 0.6, s * 0.6);
+}
+
+function drawKoiRipple(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  time: number, phase: number
+) {
+  const rippleR = SCALE * 4 + Math.sin(time * 0.005 + phase) * SCALE;
+  const alpha = 0.12 + Math.sin(time * 0.004 + phase * 2) * 0.06;
+  ctx.strokeStyle = `rgba(150, 200, 255, ${alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rippleR, rippleR * 0.35, 0, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 function drawFishingOverlay(
@@ -1370,6 +1430,39 @@ interface Petal {
   size: number;
 }
 
+// ─── Koi Gathering ──────────────────────────────────────────────────────────
+
+interface Koi {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  targetX: number;
+  targetY: number;
+  color: string;
+  accentColor: string;
+  phase: number;
+  size: number;
+  scattering: boolean;
+  scatterLife: number;
+}
+
+const KOI_COLORS = [
+  { body: "#cc5533", accent: "#f0e0d0" },
+  { body: "#e07030", accent: "#fff8f0" },
+  { body: "#d4a017", accent: "#fff0d0" },
+  { body: "#cc3322", accent: "#f8f0e8" },
+  { body: "#e88040", accent: "#ffffff" },
+];
+
+const KOI_MAX_COUNT = 3;
+const KOI_SPAWN_RADIUS = 7;
+const KOI_IDLE_DELAY = 5000;
+const KOI_SPAWN_INTERVAL = 1500;
+const KOI_SWIM_SPEED = 0.008;
+const KOI_SCATTER_SPEED = 0.04;
+const KOI_SCATTER_LIFE = 120;
+
 // ─── Audio Engine ───────────────────────────────────────────────────────────
 
 type Surface = "grass" | "stone";
@@ -1613,6 +1706,11 @@ export default function Game() {
   const fishingBiteTimeRef = useRef(0);
   const fishingCaughtFishRef = useRef<{ name: string; color: string; holdTime: number }>({ name: "", color: "", holdTime: 0 });
   const fishingHoldRef = useRef(0);
+
+  // Koi gathering state
+  const koiRef = useRef<Koi[]>([]);
+  const koiIdleTimerRef = useRef(0);
+  const koiLastSpawnRef = useRef(0);
 
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
@@ -2014,10 +2112,113 @@ export default function Game() {
           if (ZOZI_DOOR_KEYS.has(pk)) {
             savedPosRef.current = { x: playerRef.current.x, y: playerRef.current.y };
             insideHouseRef.current = true;
+            koiRef.current = [];
+            koiIdleTimerRef.current = 0;
             playerRef.current.x = 5.5;
             playerRef.current.y = 8.5;
             dirRef.current = "up";
           }
+        }
+
+        // ── Koi Gathering ──
+        {
+          const px = playerRef.current.x;
+          const py = playerRef.current.y;
+          const isIdle = !movingRef.current && fishingStateRef.current === "idle";
+          const nearWater = findNearestWater(px, py, getTileAt);
+
+          if (isIdle && nearWater) {
+            if (koiIdleTimerRef.current === 0) {
+              koiIdleTimerRef.current = time;
+            }
+            const idleDuration = time - koiIdleTimerRef.current;
+
+            // Spawn koi after delay, rate increases over time
+            if (idleDuration > KOI_IDLE_DELAY &&
+                koiRef.current.length < KOI_MAX_COUNT &&
+                time - koiLastSpawnRef.current > KOI_SPAWN_INTERVAL / (1 + idleDuration * 0.0003)) {
+              const waterTiles = findWaterTilesInRadius(px, py, KOI_SPAWN_RADIUS, getTileAt);
+              const farTiles = waterTiles.filter(t => {
+                const d = Math.abs(t.x + 0.5 - px) + Math.abs(t.y + 0.5 - py);
+                return d > 3.5;
+              });
+              if (farTiles.length > 0) {
+                const tile = farTiles[Math.floor(Math.random() * farTiles.length)];
+                const palette = KOI_COLORS[Math.floor(Math.random() * KOI_COLORS.length)];
+                koiRef.current.push({
+                  x: tile.x + 0.3 + Math.random() * 0.4,
+                  y: tile.y + 0.3 + Math.random() * 0.4,
+                  vx: 0, vy: 0,
+                  targetX: nearWater.wx + 0.5,
+                  targetY: nearWater.wy + 0.5,
+                  color: palette.body,
+                  accentColor: palette.accent,
+                  phase: Math.random() * Math.PI * 2,
+                  size: 0.85 + Math.random() * 0.3,
+                  scattering: false,
+                  scatterLife: 0,
+                });
+                koiLastSpawnRef.current = time;
+              }
+            }
+
+            // Swim toward player's nearest water tile
+            for (const koi of koiRef.current) {
+              if (koi.scattering) continue;
+              koi.targetX = nearWater.wx + 0.5;
+              koi.targetY = nearWater.wy + 0.5;
+              const ddx = koi.targetX - koi.x;
+              const ddy = koi.targetY - koi.y;
+              const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+              if (dist > 0.3) {
+                const speed = KOI_SWIM_SPEED * (0.7 + 0.3 * Math.sin(time * 0.003 + koi.phase));
+                koi.vx = (ddx / dist) * speed + Math.sin(time * 0.005 + koi.phase) * 0.002;
+                koi.vy = (ddy / dist) * speed + Math.cos(time * 0.004 + koi.phase * 1.3) * 0.002;
+              } else {
+                koi.vx = Math.sin(time * 0.003 + koi.phase) * 0.002;
+                koi.vy = Math.cos(time * 0.004 + koi.phase * 1.5) * 0.001;
+              }
+              koi.x += koi.vx;
+              koi.y += koi.vy;
+              // Stay on water tiles
+              if (getTileAt(Math.floor(koi.x), Math.floor(koi.y)) !== TileType.Water) {
+                koi.x -= koi.vx;
+                koi.y -= koi.vy;
+                koi.vx *= -0.5;
+                koi.vy *= -0.5;
+              }
+            }
+          } else {
+            // Scatter koi when player moves or leaves water — fade out in place
+            if (koiRef.current.length > 0) {
+              for (const koi of koiRef.current) {
+                if (!koi.scattering) {
+                  koi.scattering = true;
+                  koi.scatterLife = KOI_SCATTER_LIFE;
+                  koi.vx = Math.sin(koi.phase) * KOI_SCATTER_SPEED;
+                  koi.vy = Math.cos(koi.phase) * KOI_SCATTER_SPEED;
+                }
+              }
+            }
+            koiIdleTimerRef.current = 0;
+          }
+
+          // Update scattering koi
+          for (const koi of koiRef.current) {
+            if (koi.scattering) {
+              const nx = koi.x + koi.vx;
+              const ny = koi.y + koi.vy;
+              if (getTileAt(Math.floor(nx), Math.floor(ny)) === TileType.Water) {
+                koi.x = nx;
+                koi.y = ny;
+              } else {
+                koi.vx = 0;
+                koi.vy = 0;
+              }
+              koi.scatterLife--;
+            }
+          }
+          koiRef.current = koiRef.current.filter(k => !k.scattering || k.scatterLife > 0);
         }
 
         // ── Petals ──
@@ -2070,6 +2271,21 @@ export default function Game() {
             const screenY = Math.floor(ty * SCALED_TILE - camY);
             const isPulsating = tileType === TileType.Lantern && pulsatingLanternsRef.current.has(`${tx},${ty}`);
             drawTile(ctx, tileType, screenX, screenY, tx, ty, time, isPulsating);
+          }
+        }
+
+        // koi fish in water
+        for (const koi of koiRef.current) {
+          const koiSX = Math.floor(koi.x * SCALED_TILE - camX);
+          const koiSY = Math.floor(koi.y * SCALED_TILE - camY);
+          if (koiSX > -SCALED_TILE && koiSX < w + SCALED_TILE &&
+              koiSY > -SCALED_TILE && koiSY < h + SCALED_TILE) {
+            drawKoiRipple(ctx, koiSX, koiSY, time, koi.phase);
+            const alpha = koi.scattering ? Math.max(0, koi.scatterLife / KOI_SCATTER_LIFE) : 1;
+            ctx.globalAlpha = alpha;
+            drawKoi(ctx, koiSX, koiSY, koi.color, koi.accentColor,
+              time, koi.phase, koi.size, koi.vx < 0);
+            ctx.globalAlpha = 1;
           }
         }
 
