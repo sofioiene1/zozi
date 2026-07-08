@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -79,6 +79,7 @@ function getTimeOfDay() {
     tint: `rgba(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])},${p[3].toFixed(3)})`,
     vignetteAlpha: p[4],
     bg: `rgb(${Math.round(p[5])},${Math.round(p[6])},${Math.round(p[7])})`,
+    bgRgb: [Math.round(p[5]), Math.round(p[6]), Math.round(p[7])] as [number, number, number],
     playerGlow: p[8],
   };
 }
@@ -129,6 +130,156 @@ function rollFish(): { name: string; color: string; holdTime: number } {
     if (r <= 0) return { name: f.name, color: f.color, holdTime: f.holdTime };
   }
   return FISH_TYPES[0];
+}
+
+// ─── Jump ────────────────────────────────────────────────────────────────────
+
+const JUMP_MS = 460;
+const JUMP_DIST = 1.9;
+
+// ─── City ────────────────────────────────────────────────────────────────────
+
+const CITY_UNLOCK_MS = 150000; // 2:30 of walking
+const VILLAGE_CORE_CHUNKS = 6; // chunks within this radius of origin stay village forever
+
+const CITY_PALETTES = [
+  { wall: "#8a8f98", wallDark: "#6d727b" },
+  { wall: "#9a8a7a", wallDark: "#7d6f61" },
+  { wall: "#7d8894", wallDark: "#626c77" },
+  { wall: "#a89888", wallDark: "#8a7c6e" },
+  { wall: "#75797f", wallDark: "#5c6065" },
+  { wall: "#94847c", wallDark: "#786a63" },
+];
+
+const NEON_COLORS = [
+  { r: 255, g: 77, b: 157 },
+  { r: 77, g: 215, b: 255 },
+  { r: 255, g: 210, b: 77 },
+  { r: 125, g: 255, b: 106 },
+];
+
+// ─── Pandas ──────────────────────────────────────────────────────────────────
+
+type CritterKind = "panda" | "redpanda" | "villager" | "cat";
+
+interface Critter {
+  kind: CritterKind;
+  x: number;
+  y: number;
+  homeX: number;
+  homeY: number;
+  vx: number;
+  vy: number;
+  moving: boolean;
+  stateTimer: number;
+  walkAcc: number;
+  facingLeft: boolean;
+  blockKey: string;
+  following?: boolean;
+  say?: string;
+  sayUntil?: number;
+  hash?: number;
+}
+
+const PANDA_MAX = 4;
+const VILLAGER_MAX = 8;
+const CRITTER_SPEED = 0.0011; // tiles per ms — a lazy waddle
+const FOLLOW_SPEED = 0.0032; // companions trot to keep up
+
+// The red panda lives somewhere secret: 45-65 tiles from spawn, in a
+// seed-dependent direction. Villagers drop compass hints.
+function redPandaHomeFor(seed: number): { x: number; y: number } {
+  const rng = seededRandom(seed ^ 0x9e3779);
+  const ang = rng() * Math.PI * 2;
+  const dist = 45 + rng() * 20;
+  return { x: Math.floor(Math.cos(ang) * dist) + 0.5, y: Math.floor(Math.sin(ang) * dist) + 0.5 };
+}
+
+// The stray cat lives out in the city ring, past the village core.
+function catHomeFor(seed: number): { x: number; y: number } {
+  const rng = seededRandom(seed ^ 0x51ed27);
+  const ang = rng() * Math.PI * 2;
+  const dist = 135 + rng() * 25;
+  return { x: Math.floor(Math.cos(ang) * dist) + 0.5, y: Math.floor(Math.sin(ang) * dist) + 0.5 };
+}
+
+const VILLAGER_KIMONOS = ["#7a4a5a", "#4a6a5a", "#5a5a8a", "#8a6a3a", "#6a4a7a", "#3a6a7a"];
+
+function compassDir(dx: number, dy: number): string {
+  const ang = Math.atan2(dy, dx);
+  const dirs = ["east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast"];
+  return dirs[((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8];
+}
+
+const VILLAGER_LINES: ((ctx: { redPandaDir: string; catKnown: boolean }) => string)[] = [
+  () => "the koi gather if you stand still by the water...",
+  (c) => `a red panda naps somewhere to the ${c.redPandaDir}. lucky souls have seen it.`,
+  () => "hold F when the bobber sinks — the rare ones fight longer.",
+  () => "walk far enough and you'll find a place of lights and concrete.",
+  () => "zozi's house? follow the golden road, if you can find its beginning.",
+  () => "the golden bamboo grows where the grove opens up.",
+  () => "rainy days make the lanterns prettier.",
+  () => "i heard a stray cat lives in the city. it likes fish.",
+  () => "sometimes you just have to jump.",
+  () => "the spirit fish only bites for the patient.",
+  () => "press V and see the world through zozi's eyes.",
+];
+
+// ─── Seasons & Weather ──────────────────────────────────────────────────────
+
+type Season = "spring" | "summer" | "autumn" | "winter";
+type SeasonMode = Season | "auto";
+type WeatherMode = "auto" | "rain" | "clear";
+
+// zozi lives in the southern hemisphere 🇦🇷
+function seasonFromDate(): Season {
+  const m = new Date().getMonth(); // 0-11
+  if (m === 11 || m <= 1) return "summer";
+  if (m <= 4) return "autumn";
+  if (m <= 7) return "winter";
+  return "spring";
+}
+
+const SEASON_PETAL: Record<Season, { color: string; rate: number; vyMul: number }> = {
+  spring: { color: "#ffb0c0", rate: 0.03, vyMul: 1 },
+  summer: { color: "#a8d08a", rate: 0.01, vyMul: 0.8 },
+  autumn: { color: "#e08c4a", rate: 0.035, vyMul: 1.1 },
+  winter: { color: "#f0f4ff", rate: 0.05, vyMul: 0.55 },
+};
+
+interface Raindrop { x: number; y: number; speed: number; len: number }
+interface Firefly { x: number; y: number; vx: number; vy: number; phase: number; life: number }
+
+// ─── Save / Load ────────────────────────────────────────────────────────────
+
+const SAVE_KEY = "zozi-save";
+
+interface SaveData {
+  v: number;
+  seed: number;
+  x: number;
+  y: number;
+  walkMs: number;
+  city: boolean;
+  bamboo: boolean;
+  redPandaFound: boolean;
+  redPandaFollowing: boolean;
+  catFound: boolean;
+  catFollowing: boolean;
+  fish: Record<string, number>;
+  weatherMode: WeatherMode;
+  seasonMode: SeasonMode;
+}
+
+function loadSave(): Partial<SaveData> | null {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    return d && typeof d === "object" ? d : null;
+  } catch {
+    return null;
+  }
 }
 
 interface OverlayTile { type: TileType; solid: boolean }
@@ -246,10 +397,24 @@ function seededRandom(seed: number) {
   };
 }
 
+// The world seed makes every fresh browser generate a different town. It is
+// mixed into every coordinate hash, and persisted in the save so the same
+// world regenerates identically across reloads. Kept small (< 2^20) so the
+// multiplications below stay well inside float53 precision.
+let WORLD_SEED = 0;
+
+function setWorldSeed(s: number) {
+  WORLD_SEED = s & 0xfffff;
+}
+
+function newWorldSeed(): number {
+  return Math.floor(Math.random() * 0x100000);
+}
+
 function hashCoord(x: number, y: number): number {
-  let h = x * 374761393 + y * 668265263;
+  let h = x * 374761393 + y * 668265263 + WORLD_SEED * 987643;
   h = ((h ^ (h >> 13)) * 1274126177) | 0;
-  return h ^ (h >> 16);
+  return (h ^ (h >> 16)) ^ WORLD_SEED;
 }
 
 // ─── Tile Types ─────────────────────────────────────────────────────────────
@@ -274,11 +439,18 @@ const enum TileType {
   Empty,
   GoldenBamboo,
   YellowBrick,
+  Asphalt,
+  Sidewalk,
+  BuildingWall,
+  BuildingRoof,
+  BuildingDoor,
+  StreetLight,
 }
 
 // Helper: is walkable surface "stone-like"?
 function isStoneSurface(t: TileType): boolean {
-  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden || t === TileType.YellowBrick;
+  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden ||
+    t === TileType.YellowBrick || t === TileType.Asphalt || t === TileType.Sidewalk;
 }
 
 // ─── World Generation ───────────────────────────────────────────────────────
@@ -288,9 +460,11 @@ interface Chunk {
   cy: number;
   tiles: TileType[][];
   solid: boolean[][];
+  city: boolean;
 }
 
-function generateChunk(cx: number, cy: number): Chunk {
+function generateChunk(cx: number, cy: number, city = false): Chunk {
+  if (city) return generateCityChunk(cx, cy);
   const tiles: TileType[][] = [];
   const solid: boolean[][] = [];
   const rng = seededRandom(hashCoord(cx, cy));
@@ -496,7 +670,131 @@ function generateChunk(cx: number, cy: number): Chunk {
     }
   }
 
-  return { cx, cy, tiles, solid };
+  return { cx, cy, tiles, solid, city: false };
+}
+
+// ─── City Generation ─────────────────────────────────────────────────────────
+
+function generateCityChunk(cx: number, cy: number): Chunk {
+  const tiles: TileType[][] = [];
+  const solid: boolean[][] = [];
+  const rng = seededRandom(hashCoord(cx, cy));
+
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    tiles[y] = [];
+    solid[y] = [];
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      tiles[y][x] = TileType.Grass;
+      solid[y][x] = false;
+    }
+  }
+
+  const wx = cx * CHUNK_SIZE;
+  const wy = cy * CHUNK_SIZE;
+
+  // asphalt roads on the same street grid, with sidewalks alongside
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      if (my < 2 || mx < 2) {
+        tiles[y][x] = TileType.Asphalt;
+        continue;
+      }
+      if (my === 2 || my === 11 || mx === 2 || mx === 15) tiles[y][x] = TileType.Sidewalk;
+    }
+  }
+
+  // the river canals survive in the city
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      const modX = ((worldX % 48) + 48) % 48;
+      const modY = ((worldY % 48) + 48) % 48;
+      const mx = ((worldX % 16) + 16) % 16;
+      if (modY >= 22 && modY <= 24 && tiles[y][x] !== TileType.Asphalt) {
+        tiles[y][x] = TileType.Water;
+        solid[y][x] = true;
+      }
+      if (modY >= 22 && modY <= 24 && mx < 2) {
+        tiles[y][x] = TileType.Bridge;
+        solid[y][x] = false;
+      }
+      if (modX >= 38 && modX <= 40 && modY >= 8 && modY <= 10 && tiles[y][x] === TileType.Grass) {
+        tiles[y][x] = TileType.Water;
+        solid[y][x] = true;
+      }
+    }
+  }
+
+  // city blocks: buildings, pocket parks, fenced lots
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      if (tiles[y][x] !== TileType.Grass) continue;
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      const bx = Math.floor(worldX / 16);
+      const by = Math.floor(worldY / 12);
+      const blockRng = seededRandom(hashCoord(bx * 7 + 3, by * 13 + 7));
+      const blockType = blockRng();
+
+      if (blockType < 0.72) {
+        // building block
+        if (mx >= 4 && mx <= 13 && my >= 3 && my <= 9) {
+          if (my <= 4) {
+            tiles[y][x] = TileType.BuildingRoof;
+            solid[y][x] = true;
+          } else if (my === 9 && (mx === 8 || mx === 9)) {
+            tiles[y][x] = TileType.BuildingDoor;
+            solid[y][x] = true;
+          } else {
+            tiles[y][x] = TileType.BuildingWall;
+            solid[y][x] = true;
+          }
+        }
+        if ((mx === 3 && my === 3) || (mx === 14 && my === 10)) {
+          tiles[y][x] = TileType.StreetLight;
+          solid[y][x] = true;
+        }
+      } else if (blockType < 0.88) {
+        // pocket park
+        if ((mx === 5 || mx === 10) && (my === 4 || my === 8)) {
+          tiles[y][x] = TileType.TreeTrunk;
+          solid[y][x] = true;
+        }
+        if (((mx >= 4 && mx <= 6) || (mx >= 9 && mx <= 11)) && (my === 3 || my === 7)) {
+          tiles[y][x] = TileType.TreeCanopy;
+          solid[y][x] = true;
+        }
+        if (mx >= 7 && mx <= 8 && my >= 3 && my <= 9) tiles[y][x] = TileType.Garden;
+        if ((mx === 3 || mx === 12) && my >= 4 && my <= 8 && my % 2 === 0) {
+          tiles[y][x] = TileType.Bush;
+          solid[y][x] = true;
+        }
+      } else {
+        // fenced empty lot
+        if (mx >= 4 && mx <= 12 && (my === 3 || my === 9)) {
+          tiles[y][x] = TileType.StoneWall;
+          solid[y][x] = true;
+        }
+        if ((mx === 4 || mx === 12) && my >= 3 && my <= 9) {
+          tiles[y][x] = TileType.StoneWall;
+          solid[y][x] = true;
+        }
+        if (tiles[y][x] === TileType.Grass && rng() < 0.05) {
+          tiles[y][x] = TileType.Bush;
+          solid[y][x] = true;
+        }
+      }
+    }
+  }
+
+  return { cx, cy, tiles, solid, city: true };
 }
 
 // ─── House palette lookup ───────────────────────────────────────────────────
@@ -507,6 +805,12 @@ function getHousePalette(worldX: number, worldY: number) {
   if (bx === ZOZI_BLOCK.bx && by === ZOZI_BLOCK.by) return ZOZI_PALETTE;
   const idx = Math.abs(hashCoord(bx * 11 + 5, by * 17 + 3)) % HOUSE_PALETTES.length;
   return HOUSE_PALETTES[idx];
+}
+
+function getCityPalette(worldX: number, worldY: number) {
+  const bx = Math.floor(worldX / 16);
+  const by = Math.floor(worldY / 12);
+  return CITY_PALETTES[Math.abs(hashCoord(bx * 13 + 1, by * 29 + 9)) % CITY_PALETTES.length];
 }
 
 // ─── Tile Rendering ─────────────────────────────────────────────────────────
@@ -834,6 +1138,154 @@ function drawTile(
       break;
     }
 
+    case TileType.Asphalt: {
+      ctx.fillStyle = "#2e2f35";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      const aRng = seededRandom(hash);
+      ctx.fillStyle = "#383941";
+      for (let i = 0; i < 3; i++) {
+        ctx.fillRect(sx + Math.floor(aRng() * 14) * s, sy + Math.floor(aRng() * 14) * s, s * 2, s);
+      }
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      const onH = my < 2;
+      const onV = mx < 2;
+      // dashed center lines
+      ctx.fillStyle = "#c9a13b";
+      if (onH && !onV && my === 1 && ((worldX % 2) + 2) % 2 === 0) {
+        ctx.fillRect(sx + 3 * s, sy, s * 8, s);
+      }
+      if (onV && !onH && mx === 1 && ((worldY % 2) + 2) % 2 === 0) {
+        ctx.fillRect(sx, sy + 3 * s, s, s * 8);
+      }
+      // crosswalks where roads meet sidewalks
+      ctx.fillStyle = "rgba(230,230,235,0.75)";
+      if (onH && !onV && (mx === 2 || mx === 15)) {
+        for (let i = 0; i < 4; i++) ctx.fillRect(sx + (1 + i * 4) * s, sy + s, s * 2, s * 14);
+      }
+      if (onV && !onH && (my === 2 || my === 11)) {
+        for (let i = 0; i < 4; i++) ctx.fillRect(sx + s, sy + (1 + i * 4) * s, s * 14, s * 2);
+      }
+      break;
+    }
+
+    case TileType.Sidewalk: {
+      ctx.fillStyle = variant < 2 ? "#9c9ca4" : "#94949c";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#7e7e86";
+      ctx.fillRect(sx + 7 * s, sy, s, SCALED_TILE);
+      ctx.fillRect(sx, sy + 7 * s, SCALED_TILE, s);
+      if (variant === 3) {
+        ctx.fillRect(sx + 3 * s, sy + 11 * s, s * 4, s);
+      }
+      break;
+    }
+
+    case TileType.BuildingWall: {
+      const cp = getCityPalette(worldX, worldY);
+      ctx.fillStyle = cp.wall;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = cp.wallDark;
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
+      // two windows, some lit
+      for (let wI = 0; wI < 2; wI++) {
+        const wxp = sx + (wI === 0 ? 3 : 9) * s;
+        ctx.fillStyle = "#141c28";
+        ctx.fillRect(wxp, sy + 4 * s, s * 4, s * 6);
+        const lit = wI === 0 ? (hash & 3) !== 0 : ((hash >> 2) & 3) !== 0;
+        if (lit) {
+          const glow = 0.35 + Math.sin(time * 0.0008 + hash + wI * 3) * 0.1;
+          ctx.fillStyle = `rgba(255, 214, 120, ${glow})`;
+          ctx.fillRect(wxp, sy + 4 * s, s * 4, s * 6);
+        }
+        ctx.fillStyle = cp.wallDark;
+        ctx.fillRect(wxp, sy + 6 * s, s * 4, s);
+      }
+      // neon signs on some ground-floor walls
+      const myB = ((worldY % 12) + 12) % 12;
+      if (myB === 8 && Math.abs(hash) % 5 === 0) {
+        const neon = NEON_COLORS[Math.abs(hash >> 3) % NEON_COLORS.length];
+        const pulse = 0.55 + Math.sin(time * 0.004 + hash) * 0.25;
+        ctx.fillStyle = `rgba(${neon.r},${neon.g},${neon.b},${pulse * 0.35})`;
+        ctx.fillRect(sx, sy + 10 * s, SCALED_TILE, s * 6);
+        ctx.fillStyle = `rgba(${neon.r},${neon.g},${neon.b},${pulse})`;
+        ctx.fillRect(sx + 2 * s, sy + 12 * s, s * 12, s * 2);
+        ctx.fillStyle = "#101018";
+        for (let i = 0; i < 3; i++) ctx.fillRect(sx + (4 + i * 4) * s, sy + 12 * s, s, s * 2);
+      }
+      break;
+    }
+
+    case TileType.BuildingRoof: {
+      ctx.fillStyle = "#3c3e46";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#484a54";
+      ctx.fillRect(sx, sy, SCALED_TILE, s);
+      ctx.fillStyle = "#32343c";
+      for (let ry = 4; ry < 16; ry += 6) ctx.fillRect(sx, sy + ry * s, SCALED_TILE, s);
+      if ((hash & 7) === 0) {
+        // AC unit
+        ctx.fillStyle = "#8a8a92";
+        ctx.fillRect(sx + 5 * s, sy + 5 * s, s * 6, s * 5);
+        ctx.fillStyle = "#5a5a62";
+        ctx.fillRect(sx + 6 * s, sy + 6 * s, s * 4, s * 3);
+        ctx.fillStyle = "#2c2c32";
+        ctx.fillRect(sx + 7 * s, sy + 7 * s, s * 2, s);
+      }
+      break;
+    }
+
+    case TileType.BuildingDoor: {
+      const cp = getCityPalette(worldX, worldY);
+      ctx.fillStyle = cp.wall;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = cp.wallDark;
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
+      // awning
+      ctx.fillStyle = "#7a2a2a";
+      ctx.fillRect(sx + 2 * s, sy + s, s * 12, s * 2);
+      ctx.fillStyle = "#9a3a3a";
+      for (let i = 0; i < 3; i++) ctx.fillRect(sx + (3 + i * 4) * s, sy + s, s * 2, s * 2);
+      // warm light over the door
+      const doorGlow = 0.25 + Math.sin(time * 0.002 + hash) * 0.08;
+      ctx.fillStyle = `rgba(255, 220, 150, ${doorGlow})`;
+      ctx.fillRect(sx + 3 * s, sy + 3 * s, s * 10, s * 3);
+      // glass door
+      ctx.fillStyle = "#4a4a52";
+      ctx.fillRect(sx + 4 * s, sy + 5 * s, s * 8, s * 10);
+      ctx.fillStyle = "#22303e";
+      ctx.fillRect(sx + 5 * s, sy + 6 * s, s * 6, s * 9);
+      ctx.fillStyle = "#3a5a6e";
+      ctx.fillRect(sx + 6 * s, sy + 6 * s, s, s * 9);
+      // threshold
+      ctx.fillStyle = "#84848c";
+      ctx.fillRect(sx + 3 * s, sy + 15 * s, s * 10, s);
+      break;
+    }
+
+    case TileType.StreetLight: {
+      // sidewalk base
+      ctx.fillStyle = "#9c9ca4";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#7e7e86";
+      ctx.fillRect(sx + 7 * s, sy, s, SCALED_TILE);
+      ctx.fillRect(sx, sy + 7 * s, SCALED_TILE, s);
+      // glow
+      const lampGlow = 0.16 + Math.sin(time * 0.002 + hash) * 0.05;
+      ctx.fillStyle = `rgba(255, 240, 190, ${lampGlow})`;
+      ctx.fillRect(sx - 2 * s, sy - 2 * s, s * 14, s * 10);
+      // pole + arm
+      ctx.fillStyle = "#26262c";
+      ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 2, s * 13);
+      ctx.fillRect(sx + 4 * s, sy + 2 * s, s * 7, s);
+      // lamp head
+      ctx.fillStyle = "#eee8c8";
+      ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 3, s * 2);
+      break;
+    }
+
     default:
       ctx.fillStyle = "#333";
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
@@ -1096,6 +1548,137 @@ function drawKoiRipple(
   ctx.beginPath();
   ctx.ellipse(cx, cy, rippleR, rippleR * 0.35, 0, 0, Math.PI * 2);
   ctx.stroke();
+}
+
+function drawCritter(
+  ctx: CanvasRenderingContext2D,
+  sx: number, sy: number,
+  _time: number, frame: number,
+  kind: CritterKind,
+  facingLeft: boolean,
+  hash = 0
+) {
+  const s = SCALE;
+  ctx.save();
+  if (facingLeft) {
+    // mirror around the sprite's vertical center line
+    ctx.translate(2 * sx + 16 * s, 0);
+    ctx.scale(-1, 1);
+  }
+  const legOff = frame === 0 ? 0 : s;
+
+  // shadow
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.fillRect(sx + 3 * s, sy + 14 * s, 11 * s, 2 * s);
+
+  if (kind === "villager") {
+    const kimono = VILLAGER_KIMONOS[Math.abs(hash) % VILLAGER_KIMONOS.length];
+    // sandals + legs
+    ctx.fillStyle = "#8b6f4e";
+    ctx.fillRect(sx + 5 * s + legOff, sy + 14 * s, 3 * s, 2 * s);
+    ctx.fillRect(sx + 9 * s - legOff, sy + 14 * s, 3 * s, 2 * s);
+    ctx.fillStyle = "#2a2a3a";
+    ctx.fillRect(sx + 6 * s, sy + 11 * s, 5 * s, 4 * s);
+    // kimono
+    ctx.fillStyle = kimono;
+    ctx.fillRect(sx + 5 * s, sy + 5 * s, 7 * s, 7 * s);
+    // obi
+    ctx.fillStyle = "#d4c4a0";
+    ctx.fillRect(sx + 5 * s, sy + 9 * s, 7 * s, s);
+    // arms
+    ctx.fillStyle = kimono;
+    ctx.fillRect(sx + 3 * s, sy + 6 * s + (frame === 0 ? 0 : s), 2 * s, 4 * s);
+    ctx.fillRect(sx + 12 * s, sy + 6 * s + (frame === 0 ? s : 0), 2 * s, 4 * s);
+    // head
+    ctx.fillStyle = "#f0d0a0";
+    ctx.fillRect(sx + 5 * s, sy + 0 * s, 6 * s, 5 * s);
+    // hair (bun or bowl by hash)
+    ctx.fillStyle = "#1a1a2a";
+    ctx.fillRect(sx + 5 * s, sy, 6 * s, 2 * s);
+    if ((hash & 1) === 0) ctx.fillRect(sx + 7 * s, sy - s, 2 * s, s); // topknot
+    else { ctx.fillRect(sx + 4 * s, sy, s, 4 * s); ctx.fillRect(sx + 11 * s, sy, s, 4 * s); }
+    // eye (side view)
+    ctx.fillRect(sx + 9 * s, sy + 2 * s, s, s);
+  } else if (kind === "cat") {
+    // small gray city cat — tail up, alert ears
+    // tail
+    ctx.fillStyle = "#6a6a72";
+    ctx.fillRect(sx + 2 * s, sy + 6 * s, s, 5 * s);
+    ctx.fillRect(sx + 3 * s, sy + 5 * s, s, 2 * s);
+    // legs
+    ctx.fillStyle = "#55555d";
+    ctx.fillRect(sx + 5 * s + legOff, sy + 12 * s, 2 * s, 3 * s);
+    ctx.fillRect(sx + 10 * s - legOff, sy + 12 * s, 2 * s, 3 * s);
+    // body
+    ctx.fillStyle = "#8a8a92";
+    ctx.fillRect(sx + 4 * s, sy + 8 * s, 8 * s, 5 * s);
+    // stripes
+    ctx.fillStyle = "#6a6a72";
+    ctx.fillRect(sx + 6 * s, sy + 8 * s, s, 5 * s);
+    ctx.fillRect(sx + 9 * s, sy + 8 * s, s, 5 * s);
+    // head
+    ctx.fillStyle = "#93939b";
+    ctx.fillRect(sx + 10 * s, sy + 5 * s, 5 * s, 4 * s);
+    // ears
+    ctx.fillStyle = "#6a6a72";
+    ctx.fillRect(sx + 10 * s, sy + 4 * s, s, s);
+    ctx.fillRect(sx + 14 * s, sy + 4 * s, s, s);
+    // eye (green) + nose
+    ctx.fillStyle = "#7dd87d";
+    ctx.fillRect(sx + 12 * s, sy + 6 * s, s, s);
+    ctx.fillStyle = "#3a3a40";
+    ctx.fillRect(sx + 15 * s, sy + 7 * s, s, s);
+  } else if (kind === "panda") {
+    // legs
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 3 * s + legOff, sy + 11 * s, 2 * s, 4 * s);
+    ctx.fillRect(sx + 9 * s - legOff, sy + 11 * s, 2 * s, 4 * s);
+    // body
+    ctx.fillStyle = "#ece8e0";
+    ctx.fillRect(sx + 2 * s, sy + 6 * s, 10 * s, 6 * s);
+    // shoulder band
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 8 * s, sy + 6 * s, 3 * s, 6 * s);
+    // head
+    ctx.fillStyle = "#f2eee6";
+    ctx.fillRect(sx + 9 * s, sy + 2 * s, 6 * s, 6 * s);
+    // ears
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 9 * s, sy + 1 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 13 * s, sy + 1 * s, 2 * s, 2 * s);
+    // eye patch + nose
+    ctx.fillRect(sx + 12 * s, sy + 4 * s, s, 2 * s);
+    ctx.fillRect(sx + 14 * s, sy + 5 * s, s, s);
+  } else {
+    // ringed tail (behind)
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = i % 2 === 0 ? "#b85c25" : "#e8d8b0";
+      ctx.fillRect(sx + i * s, sy + 5 * s - (i % 2) * s, s, 4 * s);
+    }
+    // legs
+    ctx.fillStyle = "#3a2418";
+    ctx.fillRect(sx + 5 * s + legOff, sy + 11 * s, 2 * s, 4 * s);
+    ctx.fillRect(sx + 10 * s - legOff, sy + 11 * s, 2 * s, 4 * s);
+    // body
+    ctx.fillStyle = "#c96a2a";
+    ctx.fillRect(sx + 4 * s, sy + 6 * s, 8 * s, 6 * s);
+    // dark belly
+    ctx.fillStyle = "#4a2c18";
+    ctx.fillRect(sx + 4 * s, sy + 10 * s, 8 * s, 2 * s);
+    // head
+    ctx.fillStyle = "#d47a35";
+    ctx.fillRect(sx + 10 * s, sy + 3 * s, 6 * s, 5 * s);
+    // white-tipped ears + muzzle
+    ctx.fillStyle = "#e8e0d0";
+    ctx.fillRect(sx + 10 * s, sy + 2 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 14 * s, sy + 2 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 13 * s, sy + 5 * s, 3 * s, 2 * s);
+    // eye + nose
+    ctx.fillStyle = "#2a1a10";
+    ctx.fillRect(sx + 12 * s, sy + 4 * s, s, s);
+    ctx.fillRect(sx + 15 * s, sy + 5 * s, s, s);
+  }
+  ctx.restore();
 }
 
 function drawFishingOverlay(
@@ -1475,6 +2058,57 @@ class ZenAudio {
   private noteTimeout: ReturnType<typeof setTimeout> | null = null;
   private droneOsc: OscillatorNode | null = null;
   private droneOsc2: OscillatorNode | null = null;
+  private mode: "village" | "city" = "village";
+  private rainSource: AudioBufferSourceNode | null = null;
+  private rainGain: GainNode | null = null;
+  private muted = false;
+
+  setMode(mode: "village" | "city") {
+    this.mode = mode;
+  }
+
+  setMuted(muted: boolean) {
+    this.muted = muted;
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.linearRampToValueAtTime(muted ? 0 : 0.3, this.ctx.currentTime + 0.3);
+    }
+  }
+
+  isMuted() {
+    return this.muted;
+  }
+
+  setRain(on: boolean) {
+    if (!this.ctx || !this.masterGain) return;
+    if (on && !this.rainSource) {
+      const rate = this.ctx.sampleRate;
+      const len = rate * 2;
+      const buf = this.ctx.createBuffer(1, len, rate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 900;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.045, this.ctx.currentTime + 2);
+      src.connect(filter);
+      filter.connect(g);
+      g.connect(this.masterGain);
+      src.start();
+      this.rainSource = src;
+      this.rainGain = g;
+    } else if (!on && this.rainSource) {
+      const src = this.rainSource, g = this.rainGain!;
+      g.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + 1.5);
+      setTimeout(() => { try { src.stop(); } catch { /* already stopped */ } }, 1700);
+      this.rainSource = null;
+      this.rainGain = null;
+    }
+  }
 
 
   async init() {
@@ -1516,9 +2150,12 @@ class ZenAudio {
   private playNextNote() {
     if (!this.isPlaying || !this.ctx || !this.musicGain) return;
 
-    const notes = [220, 246.94, 293.66, 329.63, 392, 440, 493.88, 587.33];
+    // village: A-major pentatonic-ish calm; city: B♭ minor, tighter and moodier
+    const notes = this.mode === "village"
+      ? [220, 246.94, 293.66, 329.63, 392, 440, 493.88, 587.33]
+      : [233.08, 277.18, 311.13, 369.99, 415.3, 466.16, 554.37];
     const freq = notes[Math.floor(Math.random() * notes.length)];
-    const duration = 1.5 + Math.random() * 3;
+    const duration = this.mode === "village" ? 1.5 + Math.random() * 3 : 1 + Math.random() * 2;
 
     const osc = this.ctx.createOscillator();
     osc.type = "sine";
@@ -1548,7 +2185,9 @@ class ZenAudio {
       osc2.stop(this.ctx.currentTime + duration);
     }
 
-    const nextDelay = (1 + Math.random() * 4) * 1000;
+    const nextDelay = this.mode === "village"
+      ? (1 + Math.random() * 4) * 1000
+      : (0.7 + Math.random() * 2.5) * 1000;
     this.noteTimeout = setTimeout(() => this.playNextNote(), nextDelay);
   }
 
@@ -1662,11 +2301,222 @@ class ZenAudio {
     ripSrc.start(now + 0.05);
   }
 
+  playJump() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(260, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.05, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  playChime() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const freqs = [659.25, 880, 1318.5];
+    freqs.forEach((f, i) => {
+      const osc = this.ctx!.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = f;
+      const g = this.ctx!.createGain();
+      const t = now + i * 0.09;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.07, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+      osc.connect(g);
+      g.connect(this.masterGain!);
+      osc.start(t);
+      osc.stop(t + 0.7);
+    });
+  }
+
   stop() {
     this.isPlaying = false;
     if (this.noteTimeout) clearTimeout(this.noteTimeout);
     if (this.droneOsc) { this.droneOsc.stop(); this.droneOsc = null; }
     if (this.droneOsc2) { this.droneOsc2.stop(); this.droneOsc2 = null; }
+  }
+}
+
+// ─── 3D First-Person Rendering (raycaster) ──────────────────────────────────
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function wallColorFor(t: TileType, wx: number, wy: number): [number, number, number] {
+  switch (t) {
+    case TileType.HouseWall: return hexToRgb(getHousePalette(wx, wy).wallBase);
+    case TileType.HouseDoor: return hexToRgb("#5a3a2a");
+    case TileType.HouseRoof: return hexToRgb(getHousePalette(wx, wy).roofMid);
+    case TileType.TreeTrunk: return hexToRgb("#6b4e38");
+    case TileType.TreeCanopy: return hexToRgb("#8b4060");
+    case TileType.Bamboo: return hexToRgb("#5a8a4a");
+    case TileType.GoldenBamboo: return hexToRgb("#ffd700");
+    case TileType.Bush: return hexToRgb("#3a5a2a");
+    case TileType.Water: return hexToRgb("#3d6b8e");
+    case TileType.StoneWall: return hexToRgb("#8a8a7a");
+    case TileType.Fence: return hexToRgb("#9a7a5a");
+    case TileType.Lantern: return hexToRgb("#cc3333");
+    case TileType.Torii: return hexToRgb("#cc2222");
+    case TileType.BuildingWall: return hexToRgb(getCityPalette(wx, wy).wall);
+    case TileType.BuildingRoof: return hexToRgb("#3c3e46");
+    case TileType.BuildingDoor: return hexToRgb("#4a4a52");
+    case TileType.StreetLight: return hexToRgb("#26262c");
+    default: return [120, 120, 120];
+  }
+}
+
+const FOV_3D = Math.PI / 3;
+const MAX_RAY_DIST = 24;
+
+function render3D(
+  ctx: CanvasRenderingContext2D,
+  w: number, h: number,
+  px: number, py: number, angle: number,
+  tod: ReturnType<typeof getTimeOfDay>,
+  isSolid: (x: number, y: number) => boolean,
+  getTileAt: (x: number, y: number) => TileType,
+  critters: Critter[],
+  cityUnder: boolean,
+  time: number
+) {
+  const [bgR, bgG, bgB] = tod.bgRgb;
+
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, h / 2);
+  sky.addColorStop(0, tod.bg);
+  sky.addColorStop(1, `rgb(${Math.min(255, bgR + 40)},${Math.min(255, bgG + 40)},${Math.min(255, bgB + 50)})`);
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, w, h / 2);
+
+  // floor
+  const floorCol: [number, number, number] = cityUnder ? [58, 58, 64] : [47, 74, 44];
+  const floor = ctx.createLinearGradient(0, h / 2, 0, h);
+  floor.addColorStop(0, `rgb(${Math.round((floorCol[0] + bgR) / 2)},${Math.round((floorCol[1] + bgG) / 2)},${Math.round((floorCol[2] + bgB) / 2)})`);
+  floor.addColorStop(1, `rgb(${floorCol[0]},${floorCol[1]},${floorCol[2]})`);
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, h / 2, w, h / 2);
+
+  // walls via DDA raycasting
+  const numRays = Math.min(480, w);
+  const colW = w / numRays;
+  const zbuf = new Float32Array(numRays).fill(Infinity);
+
+  for (let i = 0; i < numRays; i++) {
+    const rayAngle = angle - FOV_3D / 2 + (i / numRays) * FOV_3D;
+    const dirX = Math.cos(rayAngle);
+    const dirY = Math.sin(rayAngle);
+
+    let mapX = Math.floor(px);
+    let mapY = Math.floor(py);
+    const deltaX = Math.abs(1 / (dirX || 1e-9));
+    const deltaY = Math.abs(1 / (dirY || 1e-9));
+    const stepX = dirX < 0 ? -1 : 1;
+    const stepY = dirY < 0 ? -1 : 1;
+    let sideX = dirX < 0 ? (px - mapX) * deltaX : (mapX + 1 - px) * deltaX;
+    let sideY = dirY < 0 ? (py - mapY) * deltaY : (mapY + 1 - py) * deltaY;
+
+    let side = 0;
+    let dist = Infinity;
+    for (let step = 0; step < MAX_RAY_DIST * 2; step++) {
+      if (sideX < sideY) { sideX += deltaX; mapX += stepX; side = 0; }
+      else { sideY += deltaY; mapY += stepY; side = 1; }
+      if (isSolid(mapX, mapY)) {
+        dist = side === 0 ? sideX - deltaX : sideY - deltaY;
+        break;
+      }
+      if (Math.max(sideX, sideY) > MAX_RAY_DIST) break;
+    }
+    if (!isFinite(dist)) continue;
+
+    const perpDist = Math.max(0.05, dist * Math.cos(rayAngle - angle));
+    zbuf[i] = perpDist;
+    const wallH = (h * 0.95) / perpDist;
+    const tile = getTileAt(mapX, mapY);
+    let [r, g, b] = wallColorFor(tile, mapX, mapY);
+    // subtle per-tile brightness variation
+    const vary = 0.9 + ((Math.abs(hashCoord(mapX, mapY)) & 3) / 3) * 0.18;
+    let shade = (side === 1 ? 0.72 : 1) * vary;
+    // lanterns glow
+    if (tile === TileType.Lantern || tile === TileType.GoldenBamboo) {
+      shade *= 1.15 + Math.sin(time * 0.004) * 0.15;
+    }
+    const fog = Math.min(1, perpDist / 18);
+    r = Math.round((r * shade) * (1 - fog) + bgR * fog);
+    g = Math.round((g * shade) * (1 - fog) + bgG * fog);
+    b = Math.round((b * shade) * (1 - fog) + bgB * fog);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(Math.floor(i * colW), (h - wallH) / 2, Math.ceil(colW), wallH);
+  }
+
+  // critters as billboards, far to near
+  const visible = critters
+    .map((c) => ({ c, dx: c.x - px, dy: c.y - py }))
+    .map((e) => ({ ...e, dist: Math.hypot(e.dx, e.dy) }))
+    .filter((e) => e.dist > 0.4 && e.dist < 20)
+    .sort((a, b) => b.dist - a.dist);
+
+  for (const e of visible) {
+    let rel = Math.atan2(e.dy, e.dx) - angle;
+    while (rel > Math.PI) rel -= Math.PI * 2;
+    while (rel < -Math.PI) rel += Math.PI * 2;
+    if (Math.abs(rel) > FOV_3D / 2 + 0.35) continue;
+    const corrDist = e.dist * Math.cos(rel);
+    if (corrDist < 0.2) continue;
+    const screenX = (0.5 + rel / FOV_3D) * w;
+    const col = Math.max(0, Math.min(numRays - 1, Math.floor(screenX / colW)));
+    if (zbuf[col] < corrDist) continue; // occluded by a wall
+
+    const spriteH = (h * (e.c.kind === "villager" ? 0.55 : 0.34)) / corrDist;
+    const spriteW = spriteH * 0.75;
+    const bottom = h / 2 + (h * 0.95) / corrDist / 2;
+    const fog = Math.min(0.85, corrDist / 18);
+
+    const [bodyHex, darkHex] =
+      e.c.kind === "panda" ? ["#ece8e0", "#1c1c1c"] :
+      e.c.kind === "redpanda" ? ["#c96a2a", "#3a2418"] :
+      e.c.kind === "cat" ? ["#8a8a92", "#3a3a40"] :
+      [VILLAGER_KIMONOS[Math.abs(e.c.hash ?? 0) % VILLAGER_KIMONOS.length], "#1a1a2a"];
+    const [br, bg2, bb] = hexToRgb(bodyHex);
+    const [dr, dg, db] = hexToRgb(darkHex);
+    const mix = (v: number, bgc: number) => Math.round(v * (1 - fog) + bgc * fog);
+
+    // body
+    ctx.fillStyle = `rgb(${mix(br, bgR)},${mix(bg2, bgG)},${mix(bb, bgB)})`;
+    ctx.fillRect(screenX - spriteW / 2, bottom - spriteH * 0.62, spriteW, spriteH * 0.62);
+    // head
+    const headW = spriteW * 0.62;
+    ctx.fillStyle = e.c.kind === "villager"
+      ? `rgb(${mix(240, bgR)},${mix(208, bgG)},${mix(160, bgB)})`
+      : `rgb(${mix(br, bgR)},${mix(bg2, bgG)},${mix(bb, bgB)})`;
+    ctx.fillRect(screenX - headW / 2, bottom - spriteH, headW, spriteH * 0.42);
+    // ears / hair
+    ctx.fillStyle = `rgb(${mix(dr, bgR)},${mix(dg, bgG)},${mix(db, bgB)})`;
+    if (e.c.kind === "villager") {
+      ctx.fillRect(screenX - headW / 2, bottom - spriteH, headW, spriteH * 0.12);
+    } else {
+      ctx.fillRect(screenX - headW / 2, bottom - spriteH * 1.06, headW * 0.3, spriteH * 0.12);
+      ctx.fillRect(screenX + headW / 2 - headW * 0.3, bottom - spriteH * 1.06, headW * 0.3, spriteH * 0.12);
+    }
+    // speech bubble
+    if (e.c.say && e.c.sayUntil && time < e.c.sayUntil && corrDist < 8) {
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      const tw = ctx.measureText(e.c.say).width;
+      ctx.fillStyle = "rgba(20,20,30,0.85)";
+      ctx.fillRect(screenX - tw / 2 - 6, bottom - spriteH - 24, tw + 12, 18);
+      ctx.fillStyle = "#e8e0d0";
+      ctx.fillText(e.c.say, screenX, bottom - spriteH - 11);
+    }
   }
 }
 
@@ -1676,8 +2526,10 @@ export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const titleCanvasRef = useRef<HTMLCanvasElement>(null);
   const [started, setStarted] = useState(false);
-  const [cheatPaletteOpen, setCheatPaletteOpen] = useState(false);
-  const [cheatIndex, setCheatIndex] = useState(0);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdQuery, setCmdQuery] = useState("");
+  const [cmdIndex, setCmdIndex] = useState(0);
+  const [journalOpen, setJournalOpen] = useState(false);
   const audioRef = useRef<ZenAudio | null>(null);
 
   // Game state refs
@@ -1712,11 +2564,51 @@ export default function Game() {
   const koiIdleTimerRef = useRef(0);
   const koiLastSpawnRef = useRef(0);
 
+  // Jump state
+  const jumpRef = useRef({ active: false, start: 0, fromX: 0, fromY: 0, toX: 0, toY: 0 });
+
+  // City state
+  const walkMsRef = useRef(0);
+  const cityModeRef = useRef(false);
+  const lastFrameTimeRef = useRef(0);
+
+  // Toasts / HUD
+  const toastRef = useRef({ text: "", color: "#ffd700", time: 0 });
+  const fishCountsRef = useRef<Record<string, number>>({});
+  const hintStartRef = useRef(0);
+
+  // World seed / save
+  const seedRef = useRef(0);
+
+  // 3D POV
+  const view3dRef = useRef(false);
+  const angle3dRef = useRef(0);
+
+  // Weather & seasons
+  const weatherModeRef = useRef<WeatherMode>("auto");
+  const seasonModeRef = useRef<SeasonMode>("auto");
+  const rainingRef = useRef(false);
+  const weatherNextRef = useRef(0);
+  const raindropsRef = useRef<Raindrop[]>([]);
+  const firefliesRef = useRef<Firefly[]>([]);
+  const waterTilesRef = useRef<{ x: number; y: number }[]>([]);
+  const waterScanRef = useRef(0);
+  const audioCityRef = useRef(false);
+
+  // Critters (pandas, red panda, villagers, city cat)
+  const crittersRef = useRef<Critter[]>([]);
+  const critterBlocksRef = useRef<Set<string>>(new Set());
+  const critterScanRef = useRef(0);
+  const redPandaFoundRef = useRef(false);
+  const catFoundRef = useRef(false);
+
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
     let chunk = chunksRef.current.get(key);
     if (!chunk) {
-      chunk = generateChunk(cx, cy);
+      const isCity = cityModeRef.current &&
+        !(Math.abs(cx) <= VILLAGE_CORE_CHUNKS && Math.abs(cy) <= VILLAGE_CORE_CHUNKS);
+      chunk = generateChunk(cx, cy, isCity);
       chunksRef.current.set(key, chunk);
     }
     return chunk;
@@ -1724,13 +2616,14 @@ export default function Game() {
 
   const isSolid = useCallback(
     (worldX: number, worldY: number): boolean => {
-      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
-      const ov = overlayRef.current.get(key);
+      const tx = Math.floor(worldX);
+      const ty = Math.floor(worldY);
+      const ov = overlayRef.current.get(`${tx},${ty}`);
       if (ov !== undefined) return ov.solid;
-      const cx = Math.floor(worldX / CHUNK_SIZE);
-      const cy = Math.floor(worldY / CHUNK_SIZE);
-      const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-      const ly = ((worldY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const cx = Math.floor(tx / CHUNK_SIZE);
+      const cy = Math.floor(ty / CHUNK_SIZE);
+      const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
       const chunk = getChunk(cx, cy);
       return chunk.solid[ly][lx];
     },
@@ -1739,18 +2632,117 @@ export default function Game() {
 
   const getTileAt = useCallback(
     (worldX: number, worldY: number): TileType => {
-      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
-      const ov = overlayRef.current.get(key);
+      const tx = Math.floor(worldX);
+      const ty = Math.floor(worldY);
+      const ov = overlayRef.current.get(`${tx},${ty}`);
       if (ov !== undefined) return ov.type;
-      const cx = Math.floor(worldX / CHUNK_SIZE);
-      const cy = Math.floor(worldY / CHUNK_SIZE);
-      const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-      const ly = ((worldY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const cx = Math.floor(tx / CHUNK_SIZE);
+      const cy = Math.floor(ty / CHUNK_SIZE);
+      const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
       const chunk = getChunk(cx, cy);
       return chunk.tiles[ly][lx];
     },
     [getChunk]
   );
+
+  const totalFish = useCallback(() => {
+    return Object.values(fishCountsRef.current).reduce((s, n) => s + n, 0);
+  }, []);
+
+  const saveGame = useCallback(() => {
+    const rp = crittersRef.current.find((c) => c.kind === "redpanda");
+    const cat = crittersRef.current.find((c) => c.kind === "cat");
+    const data: SaveData = {
+      v: 1,
+      seed: seedRef.current,
+      x: playerRef.current.x,
+      y: playerRef.current.y,
+      walkMs: walkMsRef.current,
+      city: cityModeRef.current,
+      bamboo: hasGoldenBambooRef.current,
+      redPandaFound: redPandaFoundRef.current,
+      redPandaFollowing: !!rp?.following,
+      catFound: catFoundRef.current,
+      catFollowing: !!cat?.following,
+      fish: fishCountsRef.current,
+      weatherMode: weatherModeRef.current,
+      seasonMode: seasonModeRef.current,
+    };
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { /* storage full/blocked */ }
+  }, []);
+
+  // Load the save (or mint a fresh world) once on mount
+  useEffect(() => {
+    const save = loadSave();
+    const seed = typeof save?.seed === "number" ? save.seed : newWorldSeed();
+    seedRef.current = seed;
+    setWorldSeed(seed);
+
+    if (save) {
+      if (save.bamboo) {
+        hasGoldenBambooRef.current = true;
+        overlayRef.current.delete(`${GOLDEN_BAMBOO_POS.x},${GOLDEN_BAMBOO_POS.y}`);
+        revealZoziPath(overlayRef.current);
+        zoziRevealedRef.current = true;
+      }
+      if (save.city) cityModeRef.current = true;
+      if (typeof save.walkMs === "number") walkMsRef.current = save.walkMs;
+      if (save.fish) fishCountsRef.current = save.fish;
+      redPandaFoundRef.current = !!save.redPandaFound;
+      catFoundRef.current = !!save.catFound;
+      if (save.weatherMode) weatherModeRef.current = save.weatherMode;
+      if (save.seasonMode) seasonModeRef.current = save.seasonMode;
+      if (typeof save.x === "number" && typeof save.y === "number") {
+        playerRef.current.x = save.x;
+        playerRef.current.y = save.y;
+      }
+    }
+
+    // nudge a target onto the nearest walkable tile
+    const findSpawn = (home: { x: number; y: number }) => {
+      for (let r = 0; r < 8; r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const tx = home.x + dx, ty = home.y + dy;
+            if (!isSolid(tx, ty)) return { x: tx, y: ty };
+          }
+        }
+      }
+      return home;
+    };
+
+    // if the save left the player inside something solid, nudge them out too
+    if (isSolid(playerRef.current.x, playerRef.current.y)) {
+      const safe = findSpawn(playerRef.current);
+      playerRef.current.x = safe.x;
+      playerRef.current.y = safe.y;
+    }
+
+    const mkUnique = (kind: CritterKind, home: { x: number; y: number }, following: boolean): Critter => {
+      const spot = following ? findSpawn({ x: playerRef.current.x + 1, y: playerRef.current.y + 1 }) : findSpawn(home);
+      return {
+        kind, x: spot.x, y: spot.y, homeX: spot.x, homeY: spot.y,
+        vx: 0, vy: 0, moving: false, stateTimer: 800 + Math.random() * 800,
+        walkAcc: 0, facingLeft: false, blockKey: "", following,
+      };
+    };
+    crittersRef.current.push(mkUnique("redpanda", redPandaHomeFor(seed), !!save?.redPandaFollowing));
+    crittersRef.current.push(mkUnique("cat", catHomeFor(seed), !!save?.catFollowing));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Autosave every 5s + on tab close
+  useEffect(() => {
+    if (!started) return;
+    const id = setInterval(saveGame, 5000);
+    window.addEventListener("beforeunload", saveGame);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("beforeunload", saveGame);
+    };
+  }, [started, saveGame]);
 
   const startGame = useCallback(async () => {
     if (started) return;
@@ -1761,87 +2753,291 @@ export default function Game() {
     await audioRef.current.start();
   }, [started]);
 
-  const CHEATS = [
-    {
-      label: "teleport to golden bamboo",
-      action: () => {
-        playerRef.current.x = GOLDEN_BAMBOO_POS.x + 0.5;
-        playerRef.current.y = GOLDEN_BAMBOO_POS.y + 1.5;
-        insideHouseRef.current = false;
+  const unlockCity = useCallback(() => {
+    if (cityModeRef.current) return;
+    cityModeRef.current = true;
+    walkMsRef.current = CITY_UNLOCK_MS;
+    toastRef.current = { text: "🌆 the landscape shifts — a city rises ahead...", color: "#9fd6ff", time: performance.now() };
+    audioRef.current?.playChime();
+    // drop cached far-away chunks so newly explored land regenerates as city
+    const pcx = Math.floor(playerRef.current.x / CHUNK_SIZE);
+    const pcy = Math.floor(playerRef.current.y / CHUNK_SIZE);
+    for (const key of Array.from(chunksRef.current.keys())) {
+      const [ccx, ccy] = key.split(",").map(Number);
+      const inCore = Math.abs(ccx) <= VILLAGE_CORE_CHUNKS && Math.abs(ccy) <= VILLAGE_CORE_CHUNKS;
+      const nearPlayer = Math.abs(ccx - pcx) <= 3 && Math.abs(ccy - pcy) <= 3;
+      if (!inCore && !nearPlayer) chunksRef.current.delete(key);
+    }
+  }, []);
+
+  const toggle3d = useCallback((on?: boolean) => {
+    const next = on ?? !view3dRef.current;
+    if (next === view3dRef.current) return;
+    if (next) {
+      // enter first person: derive view angle from facing direction
+      const d = dirRef.current;
+      angle3dRef.current = d === "right" ? 0 : d === "down" ? Math.PI / 2 : d === "left" ? Math.PI : -Math.PI / 2;
+      fishingStateRef.current = "idle";
+      if (jumpRef.current.active) {
+        jumpRef.current.active = false;
+        playerRef.current.x = jumpRef.current.toX;
+        playerRef.current.y = jumpRef.current.toY;
+      }
+      toastRef.current = { text: "◉ first person — w/s walk, a/d turn, v to return", color: "#9fd6ff", time: performance.now() };
+    } else {
+      // back to top-down: derive facing from view angle
+      const a = angle3dRef.current;
+      const q = Math.round(a / (Math.PI / 2));
+      dirRef.current = (["right", "down", "left", "up"] as Direction[])[((q % 4) + 4) % 4];
+    }
+    view3dRef.current = next;
+  }, []);
+
+  const newWorld = useCallback(() => {
+    // keep the traveler's belongings, reroll the land
+    const keep = {
+      v: 1,
+      seed: newWorldSeed(),
+      walkMs: walkMsRef.current,
+      city: cityModeRef.current,
+      fish: fishCountsRef.current,
+      weatherMode: weatherModeRef.current,
+      seasonMode: seasonModeRef.current,
+    };
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(keep)); } catch { /* ignore */ }
+    window.location.reload();
+  }, []);
+
+  interface Command {
+    name: string;
+    aliases?: string[];
+    hint?: string;
+    hidden?: boolean;
+    action: () => void;
+  }
+
+  const COMMANDS = useMemo<Command[]>(() => {
+    const teleport = (x: number, y: number) => {
+      playerRef.current.x = x;
+      playerRef.current.y = y;
+      insideHouseRef.current = false;
+    };
+    const toast = (text: string, color = "#e8e0d0") => {
+      toastRef.current = { text, color, time: performance.now() };
+    };
+    return [
+      { name: "3d view", aliases: ["3d", "pov", "first person"], hint: "see through zozi's eyes (V)", action: () => toggle3d(true) },
+      { name: "2d view", aliases: ["2d", "top down"], hint: "back to the classic view (V)", action: () => toggle3d(false) },
+      { name: "fish journal", aliases: ["journal", "fish"], hint: "your catch collection (J)", action: () => setJournalOpen(true) },
+      { name: "weather: rain", aliases: ["rain"], hint: "let it pour", action: () => { weatherModeRef.current = "rain"; toast("🌧 the rain settles in..."); } },
+      { name: "weather: clear", aliases: ["clear"], hint: "clear skies", action: () => { weatherModeRef.current = "clear"; toast("☀ the sky clears"); } },
+      { name: "weather: auto", hint: "let the world decide", action: () => { weatherModeRef.current = "auto"; toast("the weather drifts on its own"); } },
+      { name: "mute", hint: "silence the music", action: () => { audioRef.current?.setMuted(true); toast("♪ muted"); } },
+      { name: "unmute", hint: "bring the music back", action: () => { audioRef.current?.setMuted(false); toast("♪ music returns"); } },
+      { name: "save game", aliases: ["save"], hint: "progress autosaves too", action: () => { saveGame(); toast("💾 saved"); } },
+      { name: "where am i", aliases: ["where"], hint: "current coordinates", action: () => toast(`x: ${playerRef.current.x.toFixed(1)}  y: ${playerRef.current.y.toFixed(1)}  ·  seed ${seedRef.current}`) },
+      { name: "new world", aliases: ["reroll"], hint: "fresh seed — keeps your fish, resets the land", action: newWorld },
+      // hidden cheats: not listed, but typing them exactly still works
+      { name: "golden bamboo", hidden: true, action: () => teleport(GOLDEN_BAMBOO_POS.x + 0.5, GOLDEN_BAMBOO_POS.y + 1.5) },
+      { name: "zozi house", hidden: true, action: () => teleport(87.5, 69.5) },
+      {
+        name: "red panda", hidden: true, action: () => {
+          const rp = crittersRef.current.find((c) => c.kind === "redpanda");
+          if (rp) teleport(rp.x + 1, rp.y + 1);
+        },
       },
-    },
-    {
-      label: "teleport to zozi's house",
-      action: () => {
-        playerRef.current.x = 87.5;
-        playerRef.current.y = 69.5;
-        insideHouseRef.current = false;
+      {
+        name: "stray cat", hidden: true, action: () => {
+          const cat = crittersRef.current.find((c) => c.kind === "cat");
+          if (cat) teleport(cat.x + 1, cat.y + 1);
+        },
       },
-    },
-  ];
+      {
+        name: "unlock city", hidden: true, action: () => {
+          teleport(128.5, 8.5);
+          unlockCity();
+        },
+      },
+      {
+        name: "season spring", hidden: true, action: () => { seasonModeRef.current = "spring"; toast("🌸 spring"); },
+      },
+      {
+        name: "season summer", hidden: true, action: () => { seasonModeRef.current = "summer"; toast("🌿 summer"); },
+      },
+      {
+        name: "season autumn", hidden: true, action: () => { seasonModeRef.current = "autumn"; toast("🍂 autumn"); },
+      },
+      {
+        name: "season winter", hidden: true, action: () => { seasonModeRef.current = "winter"; toast("❄ winter"); },
+      },
+      {
+        name: "season auto", hidden: true, action: () => { seasonModeRef.current = "auto"; toast("the seasons follow the calendar"); },
+      },
+    ];
+  }, [unlockCity, toggle3d, newWorld, saveGame]);
+
+  const visibleCommands = useMemo(() => {
+    const q = cmdQuery.trim().toLowerCase();
+    return COMMANDS.filter((c) => !c.hidden).filter(
+      (c) => !q || c.name.includes(q) || c.aliases?.some((a) => a.includes(q)) || c.hint?.includes(q)
+    );
+  }, [COMMANDS, cmdQuery]);
+
+  const runCommand = useCallback((cmd: Command) => {
+    cmd.action();
+    setCmdOpen(false);
+    setCmdQuery("");
+    setCmdIndex(0);
+  }, []);
+
+  const submitCommand = useCallback(() => {
+    const q = cmdQuery.trim().toLowerCase();
+    const hiddenHit = COMMANDS.find(
+      (c) => c.hidden && (c.name === q || c.aliases?.includes(q))
+    );
+    if (hiddenHit) { runCommand(hiddenHit); return; }
+    const list = visibleCommands;
+    if (list.length > 0) runCommand(list[Math.min(cmdIndex, list.length - 1)]);
+  }, [cmdQuery, cmdIndex, COMMANDS, visibleCommands, runCommand]);
 
   // Input handling + keyboard start
   useEffect(() => {
     const moveKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "w", "a", "s", "d"]);
+
+    const startJump = () => {
+      const p = playerRef.current;
+      let vx = 0, vy = 0;
+      const k = keysRef.current;
+      if (k.has("ArrowLeft") || k.has("a")) vx -= 1;
+      if (k.has("ArrowRight") || k.has("d")) vx += 1;
+      if (k.has("ArrowUp") || k.has("w")) vy -= 1;
+      if (k.has("ArrowDown") || k.has("s")) vy += 1;
+      if (vx === 0 && vy === 0) {
+        // standing jump goes in the facing direction
+        if (dirRef.current === "left") vx = -1;
+        else if (dirRef.current === "right") vx = 1;
+        else if (dirRef.current === "up") vy = -1;
+        else vy = 1;
+      }
+      const len = Math.hypot(vx, vy);
+      vx /= len; vy /= len;
+      const R = 0.3;
+      const clear = (x: number, y: number) =>
+        !isSolid(x - R, y - R) && !isSolid(x + R, y - R) &&
+        !isSolid(x - R, y + R) && !isSolid(x + R, y + R);
+      // try a full leap, then a short hop, else jump in place
+      let toX = p.x, toY = p.y;
+      for (const d of [JUMP_DIST, 1.0]) {
+        const tx = p.x + vx * d, ty = p.y + vy * d;
+        if (clear(tx, ty)) { toX = tx; toY = ty; break; }
+      }
+      jumpRef.current = { active: true, start: performance.now(), fromX: p.x, fromY: p.y, toX, toY };
+      audioRef.current?.playJump();
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
-      // Cmd+K / Ctrl+K: toggle cheat palette
+      // Cmd+K / Ctrl+K: toggle the command center
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        setCheatPaletteOpen((prev) => {
-          if (!prev) setCheatIndex(0);
+        setCmdOpen((prev) => {
+          if (!prev) { setCmdQuery(""); setCmdIndex(0); }
           return !prev;
         });
         return;
       }
-      // Escape: close cheat palette
+      // Escape: close overlays / cancel fishing
       if (e.key === "Escape") {
-        setCheatPaletteOpen(false);
+        setCmdOpen(false);
+        setJournalOpen(false);
+        if (fishingStateRef.current !== "idle") fishingStateRef.current = "idle";
         return;
       }
-      if (cheatPaletteOpen) {
-        // Arrow keys: navigate cheats
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setCheatIndex((i) => (i - 1 + CHEATS.length) % CHEATS.length);
-          return;
-        }
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setCheatIndex((i) => (i + 1) % CHEATS.length);
-          return;
-        }
-        // Enter: execute selected cheat
-        if (e.key === "Enter") {
-          e.preventDefault();
-          CHEATS[cheatIndex].action();
-          setCheatPaletteOpen(false);
-          return;
-        }
-        return;
-      }
-      keysRef.current.add(e.key);
-      // Movement or Escape cancels fishing
-      if ((moveKeys.has(e.key) || e.key === "Escape") && fishingStateRef.current !== "idle") {
+      // While the command center is open, its input owns the keyboard
+      if (cmdOpen) return;
+      // normalize letters so a stuck Shift can't leave "W" behind when "w" is released
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      keysRef.current.add(key);
+      // Movement cancels fishing
+      if (moveKeys.has(key) && fishingStateRef.current !== "idle") {
         fishingStateRef.current = "idle";
       }
       // Start game on movement key press
-      if (moveKeys.has(e.key) && !started) {
+      if (moveKeys.has(key) && !started) {
         startGame();
       }
-      // Spacebar: pick up golden bamboo if nearby
-      if (e.key === " " && started && !hasGoldenBambooRef.current && !insideHouseRef.current) {
+      // J: fish journal
+      if (key === "j" && !e.repeat && started) {
+        setJournalOpen((v) => !v);
+        return;
+      }
+      // V: toggle first-person view
+      if (key === "v" && !e.repeat && started && !insideHouseRef.current) {
+        toggle3d();
+        return;
+      }
+      // Spacebar: pick up bamboo > feed companion > talk to villager > jump
+      if (e.key === " " && !e.repeat && started && !insideHouseRef.current) {
+        e.preventDefault();
         const px = playerRef.current.x, py = playerRef.current.y;
-        const dist = Math.abs(px - GOLDEN_BAMBOO_POS.x - 0.5) + Math.abs(py - GOLDEN_BAMBOO_POS.y - 0.5);
-        if (dist < 2) {
+        const bambooDist = Math.abs(px - GOLDEN_BAMBOO_POS.x - 0.5) + Math.abs(py - GOLDEN_BAMBOO_POS.y - 0.5);
+        const nearest = (kinds: CritterKind[], maxDist: number): Critter | null => {
+          let best: Critter | null = null, bestD = maxDist;
+          for (const c of crittersRef.current) {
+            if (!kinds.includes(c.kind)) continue;
+            const d = Math.abs(c.x - px) + Math.abs(c.y - py);
+            if (d < bestD) { best = c; bestD = d; }
+          }
+          return best;
+        };
+        const companion = nearest(["redpanda", "cat"], 2.5);
+        const villager = nearest(["villager"], 2.5);
+        const now = performance.now();
+        if (!hasGoldenBambooRef.current && bambooDist < 2) {
           hasGoldenBambooRef.current = true;
-          pickupMsgRef.current = performance.now();
+          pickupMsgRef.current = now;
           overlayRef.current.delete(`${GOLDEN_BAMBOO_POS.x},${GOLDEN_BAMBOO_POS.y}`);
           revealZoziPath(overlayRef.current);
           zoziRevealedRef.current = true;
+          saveGame();
+        } else if (companion) {
+          const label = companion.kind === "redpanda" ? "red panda" : "stray cat";
+          if (companion.following) {
+            companion.say = "♥";
+            companion.sayUntil = now + 1500;
+          } else if (totalFish() > 0) {
+            // feed it the most plentiful fish
+            const counts = fishCountsRef.current;
+            const species = Object.keys(counts).reduce((a, b) => (counts[a] >= counts[b] ? a : b));
+            counts[species]--;
+            if (counts[species] <= 0) delete counts[species];
+            companion.following = true;
+            companion.say = "♥";
+            companion.sayUntil = now + 2500;
+            toastRef.current = { text: `🐟 the ${label} is following you!`, color: "#ffb066", time: now };
+            audioRef.current?.playChime();
+            saveGame();
+          } else {
+            companion.say = "...";
+            companion.sayUntil = now + 1500;
+            toastRef.current = { text: `the ${label} eyes your fishing rod... (catch it a fish)`, color: "#e8e0d0", time: now };
+          }
+        } else if (villager) {
+          const rp = crittersRef.current.find((c) => c.kind === "redpanda");
+          const lineCtx = {
+            redPandaDir: rp ? compassDir(rp.x - villager.x, rp.y - villager.y) : "north",
+            catKnown: catFoundRef.current,
+          };
+          const idx = (Math.abs(villager.hash ?? 0) + Math.floor(now / 20000)) % VILLAGER_LINES.length;
+          villager.say = VILLAGER_LINES[idx](lineCtx);
+          villager.sayUntil = now + 4000;
+          villager.facingLeft = px < villager.x;
+        } else if (!jumpRef.current.active && !view3dRef.current) {
+          if (fishingStateRef.current !== "idle") fishingStateRef.current = "idle";
+          startJump();
         }
       }
       // L key: toggle pulsating on nearby lanterns
-      if ((e.key === "l" || e.key === "L") && started && !insideHouseRef.current) {
+      if (key === "l" && started && !insideHouseRef.current) {
         const px = playerRef.current.x, py = playerRef.current.y;
         const baseTx = Math.floor(px), baseTy = Math.floor(py);
         for (let dy = -2; dy <= 2; dy++) {
@@ -1859,8 +3055,8 @@ export default function Game() {
           }
         }
       }
-      // F key: fishing interaction
-      if ((e.key === "f" || e.key === "F") && started && !insideHouseRef.current) {
+      // F key: fishing interaction (ignore key-repeat so holding F doesn't cancel the wait)
+      if (key === "f" && !e.repeat && started && !insideHouseRef.current && !jumpRef.current.active && !view3dRef.current) {
         const fs = fishingStateRef.current;
         if (fs === "idle") {
           const water = findNearestWater(playerRef.current.x, playerRef.current.y, getTileAt);
@@ -1881,7 +3077,7 @@ export default function Game() {
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      keysRef.current.delete(e.key);
+      keysRef.current.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -1889,7 +3085,7 @@ export default function Game() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [started, startGame, getTileAt, cheatPaletteOpen, cheatIndex, CHEATS]);
+  }, [started, startGame, getTileAt, isSolid, cmdOpen, toggle3d, totalFish, saveGame]);
 
   // Title screen canvas animation
   useEffect(() => {
@@ -1999,6 +3195,8 @@ export default function Game() {
       const h = canvas.height;
 
       // ── Update ──
+      const dt = lastFrameTimeRef.current > 0 ? Math.min(time - lastFrameTimeRef.current, 100) : 16.7;
+      lastFrameTimeRef.current = time;
       const keys = keysRef.current;
       let dx = 0;
       let dy = 0;
@@ -2043,7 +3241,52 @@ export default function Game() {
           dirRef.current, frameRef.current, time);
       } else {
         // ── Overworld mode ──
-        if (fishingStateRef.current === "idle") {
+        const tod = getTimeOfDay();
+        const seasonNow: Season = seasonModeRef.current === "auto" ? seasonFromDate() : seasonModeRef.current;
+        const jmp = jumpRef.current;
+        if (view3dRef.current) {
+          // first-person movement: a/d or ←/→ turn, w/s or ↑/↓ walk
+          const ROT = 0.0032, MV = 0.0038;
+          if (keys.has("ArrowLeft") || keys.has("a")) angle3dRef.current -= ROT * dt;
+          if (keys.has("ArrowRight") || keys.has("d")) angle3dRef.current += ROT * dt;
+          let fwd = 0;
+          if (keys.has("ArrowUp") || keys.has("w")) fwd += 1;
+          if (keys.has("ArrowDown") || keys.has("s")) fwd -= 1;
+          movingRef.current = fwd !== 0;
+          if (fwd !== 0) {
+            const nx = playerRef.current.x + Math.cos(angle3dRef.current) * fwd * MV * dt;
+            const ny = playerRef.current.y + Math.sin(angle3dRef.current) * fwd * MV * dt;
+            const R = 0.3;
+            const cy0 = playerRef.current.y;
+            if (!isSolid(nx - R, cy0 - R) && !isSolid(nx + R, cy0 - R) &&
+                !isSolid(nx - R, cy0 + R) && !isSolid(nx + R, cy0 + R))
+              playerRef.current.x = nx;
+            const cx0 = playerRef.current.x;
+            if (!isSolid(cx0 - R, ny - R) && !isSolid(cx0 + R, ny - R) &&
+                !isSolid(cx0 - R, ny + R) && !isSolid(cx0 + R, ny + R))
+              playerRef.current.y = ny;
+            if (time - lastStepRef.current > 320) {
+              lastStepRef.current = time;
+              const underTile = getTileAt(Math.floor(playerRef.current.x), Math.floor(playerRef.current.y));
+              audioRef.current?.playFootstep(isStoneSurface(underTile) ? "stone" : "grass");
+            }
+          }
+        } else if (jmp.active) {
+          // airborne — interpolate along the arc, ignore normal movement
+          const jt = (time - jmp.start) / JUMP_MS;
+          if (jt >= 1) {
+            jmp.active = false;
+            playerRef.current.x = jmp.toX;
+            playerRef.current.y = jmp.toY;
+            const landTile = getTileAt(Math.floor(jmp.toX), Math.floor(jmp.toY));
+            audioRef.current?.playFootstep(isStoneSurface(landTile) ? "stone" : "grass");
+          } else {
+            playerRef.current.x = jmp.fromX + (jmp.toX - jmp.fromX) * jt;
+            playerRef.current.y = jmp.fromY + (jmp.toY - jmp.fromY) * jt;
+            movingRef.current = true;
+          }
+          walkTimerRef.current = 0;
+        } else if (fishingStateRef.current === "idle") {
           // Normal movement — only when not fishing
           if (movingRef.current) {
             if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
@@ -2078,6 +3321,79 @@ export default function Game() {
           frameRef.current = 0;
         }
 
+        // ── Walking clock — enough wandering reveals the city ──
+        if (movingRef.current) {
+          walkMsRef.current += dt;
+          if (!cityModeRef.current && walkMsRef.current >= CITY_UNLOCK_MS) unlockCity();
+        }
+
+        // ── Weather ──
+        {
+          const mode = weatherModeRef.current;
+          if (mode === "auto") {
+            if (weatherNextRef.current === 0) {
+              // start every session dry
+              weatherNextRef.current = time + (90 + Math.random() * 180) * 1000;
+            } else if (time > weatherNextRef.current) {
+              if (rainingRef.current) {
+                rainingRef.current = false;
+                weatherNextRef.current = time + (180 + Math.random() * 240) * 1000;
+              } else {
+                rainingRef.current = Math.random() < 0.55;
+                weatherNextRef.current = time + (rainingRef.current ? 60 + Math.random() * 90 : 120 + Math.random() * 180) * 1000;
+              }
+            }
+          } else {
+            rainingRef.current = mode === "rain";
+          }
+          audioRef.current?.setRain(rainingRef.current && seasonNow !== "winter");
+
+          if (rainingRef.current) {
+            const isSnow = seasonNow === "winter";
+            while (raindropsRef.current.length < (isSnow ? 90 : 130)) {
+              raindropsRef.current.push({
+                x: Math.random() * (w + 100) - 50,
+                y: -20 - Math.random() * h,
+                speed: isSnow ? 0.05 + Math.random() * 0.04 : 0.55 + Math.random() * 0.35,
+                len: isSnow ? 2 : 10 + Math.random() * 8,
+              });
+            }
+            for (const d of raindropsRef.current) {
+              d.y += d.speed * dt;
+              d.x += d.speed * dt * (isSnow ? 0.15 : 0.3);
+              if (d.y > h + 20) { d.y = -20; d.x = Math.random() * (w + 100) - 50; }
+            }
+          } else if (raindropsRef.current.length) {
+            raindropsRef.current = [];
+          }
+        }
+
+        // ── Fireflies at night, near water ──
+        {
+          if (time - waterScanRef.current > 1500) {
+            waterScanRef.current = time;
+            waterTilesRef.current = findWaterTilesInRadius(playerRef.current.x, playerRef.current.y, 10, getTileAt);
+          }
+          const night = tod.playerGlow > 0.04;
+          if (night && waterTilesRef.current.length > 0 && firefliesRef.current.length < 22 && Math.random() < 0.12) {
+            const t0 = waterTilesRef.current[Math.floor(Math.random() * waterTilesRef.current.length)];
+            firefliesRef.current.push({
+              x: t0.x + Math.random() * 3 - 1, y: t0.y + Math.random() * 3 - 1,
+              vx: 0, vy: 0, phase: Math.random() * Math.PI * 2,
+              life: 6000 + Math.random() * 6000,
+            });
+          }
+          for (const f of firefliesRef.current) {
+            f.vx += (Math.random() - 0.5) * 0.0004;
+            f.vy += (Math.random() - 0.5) * 0.0004;
+            f.vx *= 0.98; f.vy *= 0.98;
+            f.x += f.vx * dt * 0.06;
+            f.y += f.vy * dt * 0.06;
+            f.life -= dt;
+          }
+          firefliesRef.current = night ? firefliesRef.current.filter((f) => f.life > 0) : [];
+        }
+
         // ── Fishing state machine ──
         const fsNow = performance.now();
         const fsDelta = fsNow - fishingStartTimeRef.current;
@@ -2091,12 +3407,17 @@ export default function Game() {
           fishingHoldRef.current = 0;
         } else if (fishingStateRef.current === "bite") {
           // Hold F to reel in — rarer fish need longer hold
-          if (keys.has("f") || keys.has("F")) {
-            fishingHoldRef.current += 16.67; // ~1 frame at 60fps
+          if (keys.has("f")) {
+            fishingHoldRef.current += dt;
             if (fishingHoldRef.current >= fishingCaughtFishRef.current.holdTime) {
               fishingStateRef.current = "caught";
               fishingStartTimeRef.current = fsNow;
+              const fname = fishingCaughtFishRef.current.name;
+              fishCountsRef.current[fname] = (fishCountsRef.current[fname] ?? 0) + 1;
+              toastRef.current = { text: `you caught a ${fname}!`, color: "#ffe9a0", time: fsNow };
               audioRef.current?.playFishingSplash();
+              audioRef.current?.playChime();
+              saveGame();
             }
           } else if (fsDelta > 1500) {
             // Missed the bite
@@ -2106,8 +3427,8 @@ export default function Game() {
           fishingStateRef.current = "idle";
         }
 
-        // Check house entry
-        if (zoziRevealedRef.current) {
+        // Check house entry (not while mid-jump — only a grounded step through the door counts)
+        if (zoziRevealedRef.current && !jumpRef.current.active) {
           const pk = `${Math.floor(playerRef.current.x)},${Math.floor(playerRef.current.y)}`;
           if (ZOZI_DOOR_KEYS.has(pk)) {
             savedPosRef.current = { x: playerRef.current.x, y: playerRef.current.y };
@@ -2221,13 +3542,165 @@ export default function Game() {
           koiRef.current = koiRef.current.filter(k => !k.scattering || k.scatterLife > 0);
         }
 
-        // ── Petals ──
-        if (Math.random() < 0.03) {
+        // ── Pandas & the red panda ──
+        {
+          const px = playerRef.current.x;
+          const py = playerRef.current.y;
+
+          // spawn scan (throttled): very few pandas + some villagers, deterministic per block
+          if (time - critterScanRef.current > 500) {
+            critterScanRef.current = time;
+            crittersRef.current = crittersRef.current.filter((c) => {
+              if (c.kind === "redpanda" || c.kind === "cat" || c.following) return true;
+              if (Math.abs(c.x - px) + Math.abs(c.y - py) > 80) {
+                critterBlocksRef.current.delete(c.blockKey);
+                return false;
+              }
+              return true;
+            });
+            let pandaCount = crittersRef.current.filter((c) => c.kind === "panda").length;
+            let villagerCount = crittersRef.current.filter((c) => c.kind === "villager").length;
+            if (pandaCount < PANDA_MAX || villagerCount < VILLAGER_MAX) {
+              const bx0 = Math.floor((px - 26) / 16), bx1 = Math.floor((px + 26) / 16);
+              const by0 = Math.floor((py - 18) / 12), by1 = Math.floor((py + 18) / 12);
+              outer:
+              for (let by = by0; by <= by1; by++) {
+                for (let bx = bx0; bx <= bx1; bx++) {
+                  const bKey = `${bx},${by}`;
+                  if (critterBlocksRef.current.has(bKey)) continue;
+                  critterBlocksRef.current.add(bKey);
+                  const bHash = Math.abs(hashCoord(bx * 31 + 7, by * 57 + 11));
+                  const vHash = Math.abs(hashCoord(bx * 17 + 5, by * 23 + 3));
+                  let kind: CritterKind | null = null;
+                  if (bHash % 19 === 0 && pandaCount < PANDA_MAX) kind = "panda";
+                  else if (vHash % 7 === 0 && villagerCount < VILLAGER_MAX) kind = "villager";
+                  if (!kind) continue;
+                  const sRng = seededRandom((kind === "panda" ? bHash : vHash) + 1);
+                  for (let attempt = 0; attempt < 10; attempt++) {
+                    const tx = bx * 16 + 3 + Math.floor(sRng() * 11);
+                    const ty = by * 12 + 3 + Math.floor(sRng() * 7);
+                    const ch = getChunk(Math.floor(tx / CHUNK_SIZE), Math.floor(ty / CHUNK_SIZE));
+                    if (ch.city) break; // pandas & villagers stay out of the city
+                    if (!isSolid(tx, ty)) {
+                      crittersRef.current.push({
+                        kind, x: tx + 0.5, y: ty + 0.5,
+                        homeX: tx + 0.5, homeY: ty + 0.5,
+                        vx: 0, vy: 0, moving: false,
+                        stateTimer: 400 + sRng() * 1200,
+                        walkAcc: 0, facingLeft: false, blockKey: bKey,
+                        hash: vHash,
+                      });
+                      if (kind === "panda") pandaCount++; else villagerCount++;
+                      break;
+                    }
+                  }
+                  if (pandaCount >= PANDA_MAX && villagerCount >= VILLAGER_MAX) break outer;
+                }
+              }
+            }
+
+            // city ↔ village ambience follows the ground under your feet
+            const hereChunk = getChunk(Math.floor(px / CHUNK_SIZE), Math.floor(py / CHUNK_SIZE));
+            if (hereChunk.city !== audioCityRef.current) {
+              audioCityRef.current = hereChunk.city;
+              audioRef.current?.setMode(hereChunk.city ? "city" : "village");
+            }
+
+            // prune far-away chunks so the cache never grows unbounded
+            if (chunksRef.current.size > 380) {
+              const pcx = Math.floor(px / CHUNK_SIZE), pcy = Math.floor(py / CHUNK_SIZE);
+              for (const key of Array.from(chunksRef.current.keys())) {
+                const [ccx, ccy] = key.split(",").map(Number);
+                if (Math.max(Math.abs(ccx - pcx), Math.abs(ccy - pcy)) > 6) chunksRef.current.delete(key);
+              }
+            }
+          }
+
+          // wander AI (+ companions that follow)
+          for (const c of crittersRef.current) {
+            const cd = Math.abs(c.x - px) + Math.abs(c.y - py);
+            if (c.following) {
+              const ddx = px - c.x, ddy = py - c.y;
+              const d2 = Math.hypot(ddx, ddy);
+              if (d2 > 25) {
+                // left far behind (teleport, jump chains) — catch up
+                for (const [ox, oy] of [[1, 1], [-1, 1], [1, -1], [-1, -1]] as const) {
+                  if (!isSolid(px + ox, py + oy)) { c.x = px + ox; c.y = py + oy; break; }
+                }
+              } else if (d2 > 1.6) {
+                const sp = Math.min(FOLLOW_SPEED, (d2 - 1.2) * 0.002);
+                const nx = c.x + (ddx / d2) * sp * dt;
+                const ny = c.y + (ddy / d2) * sp * dt;
+                const R = 0.25;
+                const clearAt = (x: number, y: number) =>
+                  !isSolid(x - R, y - R) && !isSolid(x + R, y - R) &&
+                  !isSolid(x - R, y + R) && !isSolid(x + R, y + R);
+                if (clearAt(nx, ny)) { c.x = nx; c.y = ny; }
+                else if (clearAt(nx, c.y)) { c.x = nx; }
+                else if (clearAt(c.x, ny)) { c.y = ny; }
+                c.walkAcc += dt;
+                c.moving = true;
+                c.facingLeft = ddx < 0;
+              } else {
+                c.moving = false;
+              }
+              continue;
+            }
+            if (cd > 40) continue;
+            c.stateTimer -= dt;
+            if (c.stateTimer <= 0) {
+              if (Math.random() < 0.45) {
+                c.moving = false;
+                c.stateTimer = 900 + Math.random() * 1800;
+              } else {
+                const distHome = Math.hypot(c.x - c.homeX, c.y - c.homeY);
+                const ang = distHome > 4
+                  ? Math.atan2(c.homeY - c.y, c.homeX - c.x) + (Math.random() - 0.5)
+                  : Math.random() * Math.PI * 2;
+                c.vx = Math.cos(ang) * CRITTER_SPEED;
+                c.vy = Math.sin(ang) * CRITTER_SPEED;
+                c.moving = true;
+                c.facingLeft = c.vx < 0;
+                c.stateTimer = 700 + Math.random() * 1300;
+              }
+            }
+            if (c.moving) {
+              const nx = c.x + c.vx * dt;
+              const ny = c.y + c.vy * dt;
+              const R = 0.25;
+              if (!isSolid(nx - R, ny - R) && !isSolid(nx + R, ny - R) &&
+                  !isSolid(nx - R, ny + R) && !isSolid(nx + R, ny + R)) {
+                c.x = nx;
+                c.y = ny;
+                c.walkAcc += dt;
+              } else {
+                c.moving = false;
+                c.stateTimer = 400 + Math.random() * 600;
+              }
+            }
+            if (c.kind === "redpanda" && !redPandaFoundRef.current && cd < 3) {
+              redPandaFoundRef.current = true;
+              toastRef.current = { text: "✨ you found the red panda! ✨", color: "#ffb066", time };
+              audioRef.current?.playChime();
+              saveGame();
+            }
+            if (c.kind === "cat" && !catFoundRef.current && cd < 3) {
+              catFoundRef.current = true;
+              toastRef.current = { text: "🐈 you found the stray cat of the city!", color: "#c8d8ff", time };
+              audioRef.current?.playChime();
+              saveGame();
+            }
+          }
+        }
+
+        // ── Petals (seasonal: sakura, leaves, snow) ──
+        const petalCfg = SEASON_PETAL[seasonNow];
+        if (Math.random() < petalCfg.rate) {
           petalsRef.current.push({
             x: playerRef.current.x + (Math.random() - 0.5) * 20,
             y: playerRef.current.y - 8 + Math.random() * 2,
             vx: -0.005 + Math.random() * 0.01,
-            vy: 0.005 + Math.random() * 0.008,
+            vy: (0.005 + Math.random() * 0.008) * petalCfg.vyMul,
             life: 300 + Math.random() * 200,
             size: 1 + Math.random(),
           });
@@ -2243,9 +3716,20 @@ export default function Game() {
         ctx.imageSmoothingEnabled = false;
         const camX = playerRef.current.x * SCALED_TILE - w / 2;
         const camY = playerRef.current.y * SCALED_TILE - h / 2;
-        const tod = getTimeOfDay();
         ctx.fillStyle = tod.bg;
         ctx.fillRect(0, 0, w, h);
+
+        if (view3dRef.current) {
+          const pChunk = getChunk(
+            Math.floor(playerRef.current.x / CHUNK_SIZE),
+            Math.floor(playerRef.current.y / CHUNK_SIZE)
+          );
+          render3D(
+            ctx, w, h,
+            playerRef.current.x, playerRef.current.y, angle3dRef.current,
+            tod, isSolid, getTileAt, crittersRef.current, pChunk.city, time
+          );
+        } else {
 
         const startTileX = Math.floor(camX / SCALED_TILE) - 1;
         const startTileY = Math.floor(camY / SCALED_TILE) - 1;
@@ -2289,10 +3773,43 @@ export default function Game() {
           }
         }
 
-        // character
+        // pandas
+        for (const c of crittersRef.current) {
+          const csx = Math.floor(c.x * SCALED_TILE - camX) - 8 * SCALE;
+          const csy = Math.floor(c.y * SCALED_TILE - camY) - 10 * SCALE;
+          if (csx < -SCALED_TILE * 2 || csx > w + SCALED_TILE ||
+              csy < -SCALED_TILE * 2 || csy > h + SCALED_TILE) continue;
+          const cFrame = c.moving ? Math.floor(c.walkAcc / 160) % 2 : 0;
+          drawCritter(ctx, csx, csy, time, cFrame, c.kind, c.facingLeft, c.hash ?? 0);
+        }
+
+        // speech bubbles
+        ctx.font = "11px monospace";
+        ctx.textAlign = "center";
+        for (const c of crittersRef.current) {
+          if (!c.say || !c.sayUntil || time > c.sayUntil) continue;
+          const bx = Math.floor(c.x * SCALED_TILE - camX);
+          const by = Math.floor(c.y * SCALED_TILE - camY) - 14 * SCALE;
+          const tw = ctx.measureText(c.say).width;
+          ctx.fillStyle = "rgba(20,20,30,0.85)";
+          ctx.fillRect(bx - tw / 2 - 6, by - 14, tw + 12, 18);
+          ctx.fillStyle = "#e8e0d0";
+          ctx.fillText(c.say, bx, by - 1);
+        }
+
+        // character (with jump arc + shadow)
         const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
         const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
-        drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current, fishingStateRef.current);
+        let jumpLift = 0;
+        if (jumpRef.current.active) {
+          const jt = Math.min((time - jumpRef.current.start) / JUMP_MS, 1);
+          jumpLift = -Math.sin(Math.PI * jt) * 6 * SCALE;
+          ctx.fillStyle = "rgba(0,0,0,0.25)";
+          ctx.beginPath();
+          ctx.ellipse(charScreenX + 8 * SCALE, charScreenY + 15 * SCALE, 5 * SCALE, 2 * SCALE, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        drawCharacter(ctx, charScreenX, charScreenY + jumpLift, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current, fishingStateRef.current);
 
         // fishing overlay
         if (fishingStateRef.current !== "idle") {
@@ -2309,27 +3826,8 @@ export default function Game() {
           );
         }
 
-        // golden bamboo pickup message
-        if (pickupMsgRef.current > 0 && time - pickupMsgRef.current < 3000) {
-          const msgAlpha = Math.max(0, 1 - (time - pickupMsgRef.current) / 3000);
-          ctx.globalAlpha = msgAlpha;
-          ctx.fillStyle = "#ffd700";
-          ctx.font = "bold 16px monospace";
-          ctx.textAlign = "center";
-          ctx.fillText("✨ golden bamboo found! follow the golden road... ✨", w / 2, 40);
-          ctx.globalAlpha = 1;
-        }
-
-        // bamboo indicator when held
-        if (hasGoldenBambooRef.current) {
-          ctx.fillStyle = "#ffd700";
-          ctx.fillRect(w - 30, 10, 6, 20);
-          ctx.fillStyle = "#d4a017";
-          ctx.fillRect(w - 29, 10, 4, 20);
-        }
-
-        // petals
-        ctx.fillStyle = COLORS.petal;
+        // petals / leaves / snow
+        ctx.fillStyle = petalCfg.color;
         for (const p of petalsRef.current) {
           const ppx = Math.floor(p.x * SCALED_TILE - camX);
           const ppy = Math.floor(p.y * SCALED_TILE - camY);
@@ -2339,9 +3837,17 @@ export default function Game() {
         }
         ctx.globalAlpha = 1;
 
-        // time-of-day tint
-        ctx.fillStyle = tod.tint;
-        ctx.fillRect(0, 0, w, h);
+        // fireflies
+        for (const f of firefliesRef.current) {
+          const fx = Math.floor(f.x * SCALED_TILE - camX);
+          const fy = Math.floor(f.y * SCALED_TILE - camY);
+          const pulse = 0.35 + Math.sin(time * 0.006 + f.phase) * 0.35;
+          const fade = Math.min(1, f.life / 1500);
+          ctx.fillStyle = `rgba(255,240,130,${(pulse * fade * 0.25).toFixed(3)})`;
+          ctx.fillRect(fx - 4, fy - 4, 9, 9);
+          ctx.fillStyle = `rgba(255,244,160,${(pulse * fade).toFixed(3)})`;
+          ctx.fillRect(fx - 1, fy - 1, 3, 3);
+        }
 
         // player aura glow at night
         if (tod.playerGlow > 0) {
@@ -2356,6 +3862,86 @@ export default function Game() {
           ctx.fillRect(glowCx - glowR, glowCy - glowR, glowR * 2, glowR * 2);
         }
 
+        } // end 2D world rendering
+
+        // rain / snow overlay (screen space — falls over both views)
+        if (raindropsRef.current.length > 0) {
+          if (seasonNow === "winter") {
+            ctx.fillStyle = "rgba(240,246,255,0.8)";
+            for (const d of raindropsRef.current) ctx.fillRect(d.x, d.y, 2.5, 2.5);
+          } else {
+            ctx.fillStyle = "rgba(20,30,60,0.10)";
+            ctx.fillRect(0, 0, w, h);
+            ctx.strokeStyle = "rgba(170,190,230,0.35)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (const d of raindropsRef.current) {
+              ctx.moveTo(d.x, d.y);
+              ctx.lineTo(d.x - d.len * 0.3, d.y - d.len);
+            }
+            ctx.stroke();
+          }
+        }
+
+        // golden bamboo pickup message
+        if (pickupMsgRef.current > 0 && time - pickupMsgRef.current < 3000) {
+          const msgAlpha = Math.max(0, 1 - (time - pickupMsgRef.current) / 3000);
+          ctx.globalAlpha = msgAlpha;
+          ctx.fillStyle = "#ffd700";
+          ctx.font = "bold 16px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("✨ golden bamboo found! follow the golden road... ✨", w / 2, 40);
+          ctx.globalAlpha = 1;
+        }
+
+        // toast messages (fish caught, red panda, city)
+        const toast = toastRef.current;
+        if (toast.time > 0 && time - toast.time < 3500) {
+          const toastAlpha = Math.max(0, 1 - (time - toast.time) / 3500);
+          ctx.globalAlpha = toastAlpha;
+          ctx.fillStyle = toast.color;
+          ctx.font = "bold 15px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(toast.text, w / 2, 64);
+          ctx.globalAlpha = 1;
+        }
+
+        // bamboo indicator when held
+        if (hasGoldenBambooRef.current) {
+          ctx.fillStyle = "#ffd700";
+          ctx.fillRect(w - 30, 10, 6, 20);
+          ctx.fillStyle = "#d4a017";
+          ctx.fillRect(w - 29, 10, 4, 20);
+        }
+
+        // fish tally
+        const fishTotal = totalFish();
+        if (fishTotal > 0) {
+          const fhY = hasGoldenBambooRef.current ? 52 : 20;
+          drawPixelFish(ctx, w - 44, fhY, "#7a9bb5", time);
+          ctx.fillStyle = "rgba(255,255,255,0.75)";
+          ctx.font = "12px monospace";
+          ctx.textAlign = "left";
+          ctx.fillText(`× ${fishTotal}`, w - 28, fhY + 4);
+        }
+
+        // controls hint for the first few seconds
+        if (hintStartRef.current === 0) hintStartRef.current = time;
+        const hintAge = time - hintStartRef.current;
+        if (hintAge < 11000) {
+          const hintAlpha = hintAge < 800 ? hintAge / 800 : hintAge > 9000 ? Math.max(0, 1 - (hintAge - 9000) / 2000) : 1;
+          ctx.globalAlpha = hintAlpha * 0.55;
+          ctx.fillStyle = "#e8e0d0";
+          ctx.font = "12px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("arrows/wasd walk · space jump/talk · f fish · j journal · v 3d · ⌘k commands", w / 2, h - 20);
+          ctx.globalAlpha = 1;
+        }
+
+        // time-of-day tint
+        ctx.fillStyle = tod.tint;
+        ctx.fillRect(0, 0, w, h);
+
         // vignette
         const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
         gradient.addColorStop(0, "rgba(0,0,0,0)");
@@ -2363,8 +3949,15 @@ export default function Game() {
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, w, h);
 
-        // dev coordinates
+        // dev coordinates + debug hook
         if (process.env.NODE_ENV === "development") {
+          (window as unknown as Record<string, unknown>).__zozi = {
+            player: playerRef.current,
+            critters: crittersRef.current,
+            seed: seedRef.current,
+            raining: rainingRef.current,
+            view3d: view3dRef.current,
+          };
           ctx.fillStyle = "rgba(255,255,255,0.4)";
           ctx.font = "11px monospace";
           ctx.textAlign = "right";
@@ -2382,7 +3975,7 @@ export default function Game() {
       cancelAnimationFrame(animFrame);
       window.removeEventListener("resize", resize);
     };
-  }, [started, getChunk, isSolid, getTileAt]);
+  }, [started, getChunk, isSolid, getTileAt, unlockCity, saveGame, totalFish]);
 
   // Cleanup
   useEffect(() => {
@@ -2402,7 +3995,7 @@ export default function Game() {
   return (
     <>
       <canvas ref={canvasRef} className="block w-screen h-screen" />
-      {cheatPaletteOpen && (
+      {cmdOpen && (
         <div
           style={{
             position: "fixed",
@@ -2411,10 +4004,10 @@ export default function Game() {
             display: "flex",
             alignItems: "flex-start",
             justifyContent: "center",
-            paddingTop: "20vh",
+            paddingTop: "18vh",
             zIndex: 100,
           }}
-          onClick={() => setCheatPaletteOpen(false)}
+          onClick={() => setCmdOpen(false)}
         >
           <div
             style={{
@@ -2422,39 +4015,146 @@ export default function Game() {
               border: "1px solid #333",
               borderRadius: 8,
               padding: 8,
-              minWidth: 260,
+              minWidth: 340,
+              maxWidth: 440,
               fontFamily: "monospace",
               fontSize: 13,
               color: "#e0d8c8",
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ padding: "4px 8px", opacity: 0.5, fontSize: 11 }}>cheats</div>
-            {CHEATS.map((cheat, i) => (
+            <input
+              autoFocus
+              value={cmdQuery}
+              placeholder="type a command..."
+              onChange={(e) => {
+                setCmdQuery(e.target.value);
+                setCmdIndex(0);
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Escape") { setCmdOpen(false); return; }
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setCmdIndex((i) => Math.min(i + 1, Math.max(0, visibleCommands.length - 1)));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setCmdIndex((i) => Math.max(i - 1, 0));
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  submitCommand();
+                }
+              }}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                background: "#12121f",
+                border: "1px solid #333",
+                borderRadius: 4,
+                padding: "8px 10px",
+                marginBottom: 6,
+                fontFamily: "monospace",
+                fontSize: 13,
+                color: "#e8e0d0",
+                outline: "none",
+              }}
+            />
+            {visibleCommands.length === 0 && (
+              <div style={{ padding: "8px 10px", opacity: 0.45, fontSize: 12 }}>
+                press enter if you know what you&apos;re doing...
+              </div>
+            )}
+            {visibleCommands.map((cmd, i) => (
               <button
-                key={i}
+                key={cmd.name}
                 style={{
-                  display: "block",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
                   width: "100%",
                   textAlign: "left",
-                  padding: "8px 12px",
-                  background: i === cheatIndex ? "#2a2a4e" : "transparent",
+                  padding: "7px 10px",
+                  background: i === cmdIndex ? "#2a2a4e" : "transparent",
                   border: "none",
-                  color: i === cheatIndex ? "#ffd700" : "#e0d8c8",
+                  color: i === cmdIndex ? "#ffd700" : "#e0d8c8",
                   fontFamily: "monospace",
                   fontSize: 13,
                   cursor: "pointer",
                   borderRadius: 4,
                 }}
-                onMouseEnter={() => setCheatIndex(i)}
-                onClick={() => {
-                  cheat.action();
-                  setCheatPaletteOpen(false);
-                }}
+                onMouseEnter={() => setCmdIndex(i)}
+                onClick={() => runCommand(cmd)}
               >
-                {cheat.label}
+                <span>{cmd.name}</span>
+                {cmd.hint && <span style={{ opacity: 0.45, fontSize: 11 }}>{cmd.hint}</span>}
               </button>
             ))}
+          </div>
+        </div>
+      )}
+      {journalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 90,
+          }}
+          onClick={() => setJournalOpen(false)}
+        >
+          <div
+            style={{
+              background: "#1a1a2e",
+              border: "1px solid #3a3a52",
+              borderRadius: 10,
+              padding: "18px 22px",
+              minWidth: 340,
+              fontFamily: "monospace",
+              color: "#e0d8c8",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 15, marginBottom: 12, color: "#ffd700" }}>
+              🎣 fish journal
+            </div>
+            {FISH_TYPES.map((f) => {
+              const count = fishCountsRef.current[f.name] ?? 0;
+              const rarity = "★".repeat(Math.max(1, Math.round(6 - f.weight / 7)));
+              return (
+                <div
+                  key={f.name}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "5px 0",
+                    opacity: count > 0 ? 1 : 0.4,
+                    fontSize: 13,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: 3,
+                      background: count > 0 ? f.color : "#333",
+                      display: "inline-block",
+                    }}
+                  />
+                  <span style={{ width: 130 }}>{count > 0 ? f.name : "???"}</span>
+                  <span style={{ opacity: 0.55, fontSize: 11, width: 60 }}>{rarity}</span>
+                  <span style={{ marginLeft: "auto", color: count > 0 ? "#ffd700" : "#555" }}>
+                    {count > 0 ? `× ${count}` : "—"}
+                  </span>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: 12, fontSize: 11, opacity: 0.45 }}>
+              {Object.keys(fishCountsRef.current).length}/{FISH_TYPES.length} species · press J or click away to close
+            </div>
           </div>
         </div>
       )}
