@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -130,6 +130,53 @@ function rollFish(): { name: string; color: string; holdTime: number } {
   }
   return FISH_TYPES[0];
 }
+
+// ─── Jump ────────────────────────────────────────────────────────────────────
+
+const JUMP_MS = 460;
+const JUMP_DIST = 1.9;
+
+// ─── City ────────────────────────────────────────────────────────────────────
+
+const CITY_UNLOCK_MS = 150000; // 2:30 of walking
+const VILLAGE_CORE_CHUNKS = 6; // chunks within this radius of origin stay village forever
+
+const CITY_PALETTES = [
+  { wall: "#8a8f98", wallDark: "#6d727b" },
+  { wall: "#9a8a7a", wallDark: "#7d6f61" },
+  { wall: "#7d8894", wallDark: "#626c77" },
+  { wall: "#a89888", wallDark: "#8a7c6e" },
+  { wall: "#75797f", wallDark: "#5c6065" },
+  { wall: "#94847c", wallDark: "#786a63" },
+];
+
+const NEON_COLORS = [
+  { r: 255, g: 77, b: 157 },
+  { r: 77, g: 215, b: 255 },
+  { r: 255, g: 210, b: 77 },
+  { r: 125, g: 255, b: 106 },
+];
+
+// ─── Pandas ──────────────────────────────────────────────────────────────────
+
+interface Critter {
+  kind: "panda" | "redpanda";
+  x: number;
+  y: number;
+  homeX: number;
+  homeY: number;
+  vx: number;
+  vy: number;
+  moving: boolean;
+  stateTimer: number;
+  walkAcc: number;
+  facingLeft: boolean;
+  blockKey: string;
+}
+
+const PANDA_MAX = 4;
+const CRITTER_SPEED = 0.0011; // tiles per ms — a lazy waddle
+const RED_PANDA_HOME = { x: 54.5, y: 55.5 }; // in the bamboo park, near the golden bamboo
 
 interface OverlayTile { type: TileType; solid: boolean }
 
@@ -274,11 +321,18 @@ const enum TileType {
   Empty,
   GoldenBamboo,
   YellowBrick,
+  Asphalt,
+  Sidewalk,
+  BuildingWall,
+  BuildingRoof,
+  BuildingDoor,
+  StreetLight,
 }
 
 // Helper: is walkable surface "stone-like"?
 function isStoneSurface(t: TileType): boolean {
-  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden || t === TileType.YellowBrick;
+  return t === TileType.Path || t === TileType.Bridge || t === TileType.Garden ||
+    t === TileType.YellowBrick || t === TileType.Asphalt || t === TileType.Sidewalk;
 }
 
 // ─── World Generation ───────────────────────────────────────────────────────
@@ -288,9 +342,11 @@ interface Chunk {
   cy: number;
   tiles: TileType[][];
   solid: boolean[][];
+  city: boolean;
 }
 
-function generateChunk(cx: number, cy: number): Chunk {
+function generateChunk(cx: number, cy: number, city = false): Chunk {
+  if (city) return generateCityChunk(cx, cy);
   const tiles: TileType[][] = [];
   const solid: boolean[][] = [];
   const rng = seededRandom(hashCoord(cx, cy));
@@ -496,7 +552,131 @@ function generateChunk(cx: number, cy: number): Chunk {
     }
   }
 
-  return { cx, cy, tiles, solid };
+  return { cx, cy, tiles, solid, city: false };
+}
+
+// ─── City Generation ─────────────────────────────────────────────────────────
+
+function generateCityChunk(cx: number, cy: number): Chunk {
+  const tiles: TileType[][] = [];
+  const solid: boolean[][] = [];
+  const rng = seededRandom(hashCoord(cx, cy));
+
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    tiles[y] = [];
+    solid[y] = [];
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      tiles[y][x] = TileType.Grass;
+      solid[y][x] = false;
+    }
+  }
+
+  const wx = cx * CHUNK_SIZE;
+  const wy = cy * CHUNK_SIZE;
+
+  // asphalt roads on the same street grid, with sidewalks alongside
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      if (my < 2 || mx < 2) {
+        tiles[y][x] = TileType.Asphalt;
+        continue;
+      }
+      if (my === 2 || my === 11 || mx === 2 || mx === 15) tiles[y][x] = TileType.Sidewalk;
+    }
+  }
+
+  // the river canals survive in the city
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      const modX = ((worldX % 48) + 48) % 48;
+      const modY = ((worldY % 48) + 48) % 48;
+      const mx = ((worldX % 16) + 16) % 16;
+      if (modY >= 22 && modY <= 24 && tiles[y][x] !== TileType.Asphalt) {
+        tiles[y][x] = TileType.Water;
+        solid[y][x] = true;
+      }
+      if (modY >= 22 && modY <= 24 && mx < 2) {
+        tiles[y][x] = TileType.Bridge;
+        solid[y][x] = false;
+      }
+      if (modX >= 38 && modX <= 40 && modY >= 8 && modY <= 10 && tiles[y][x] === TileType.Grass) {
+        tiles[y][x] = TileType.Water;
+        solid[y][x] = true;
+      }
+    }
+  }
+
+  // city blocks: buildings, pocket parks, fenced lots
+  for (let y = 0; y < CHUNK_SIZE; y++) {
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      const worldX = wx + x;
+      const worldY = wy + y;
+      if (tiles[y][x] !== TileType.Grass) continue;
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      const bx = Math.floor(worldX / 16);
+      const by = Math.floor(worldY / 12);
+      const blockRng = seededRandom(hashCoord(bx * 7 + 3, by * 13 + 7));
+      const blockType = blockRng();
+
+      if (blockType < 0.72) {
+        // building block
+        if (mx >= 4 && mx <= 13 && my >= 3 && my <= 9) {
+          if (my <= 4) {
+            tiles[y][x] = TileType.BuildingRoof;
+            solid[y][x] = true;
+          } else if (my === 9 && (mx === 8 || mx === 9)) {
+            tiles[y][x] = TileType.BuildingDoor;
+            solid[y][x] = true;
+          } else {
+            tiles[y][x] = TileType.BuildingWall;
+            solid[y][x] = true;
+          }
+        }
+        if ((mx === 3 && my === 3) || (mx === 14 && my === 10)) {
+          tiles[y][x] = TileType.StreetLight;
+          solid[y][x] = true;
+        }
+      } else if (blockType < 0.88) {
+        // pocket park
+        if ((mx === 5 || mx === 10) && (my === 4 || my === 8)) {
+          tiles[y][x] = TileType.TreeTrunk;
+          solid[y][x] = true;
+        }
+        if (((mx >= 4 && mx <= 6) || (mx >= 9 && mx <= 11)) && (my === 3 || my === 7)) {
+          tiles[y][x] = TileType.TreeCanopy;
+          solid[y][x] = true;
+        }
+        if (mx >= 7 && mx <= 8 && my >= 3 && my <= 9) tiles[y][x] = TileType.Garden;
+        if ((mx === 3 || mx === 12) && my >= 4 && my <= 8 && my % 2 === 0) {
+          tiles[y][x] = TileType.Bush;
+          solid[y][x] = true;
+        }
+      } else {
+        // fenced empty lot
+        if (mx >= 4 && mx <= 12 && (my === 3 || my === 9)) {
+          tiles[y][x] = TileType.StoneWall;
+          solid[y][x] = true;
+        }
+        if ((mx === 4 || mx === 12) && my >= 3 && my <= 9) {
+          tiles[y][x] = TileType.StoneWall;
+          solid[y][x] = true;
+        }
+        if (tiles[y][x] === TileType.Grass && rng() < 0.05) {
+          tiles[y][x] = TileType.Bush;
+          solid[y][x] = true;
+        }
+      }
+    }
+  }
+
+  return { cx, cy, tiles, solid, city: true };
 }
 
 // ─── House palette lookup ───────────────────────────────────────────────────
@@ -507,6 +687,12 @@ function getHousePalette(worldX: number, worldY: number) {
   if (bx === ZOZI_BLOCK.bx && by === ZOZI_BLOCK.by) return ZOZI_PALETTE;
   const idx = Math.abs(hashCoord(bx * 11 + 5, by * 17 + 3)) % HOUSE_PALETTES.length;
   return HOUSE_PALETTES[idx];
+}
+
+function getCityPalette(worldX: number, worldY: number) {
+  const bx = Math.floor(worldX / 16);
+  const by = Math.floor(worldY / 12);
+  return CITY_PALETTES[Math.abs(hashCoord(bx * 13 + 1, by * 29 + 9)) % CITY_PALETTES.length];
 }
 
 // ─── Tile Rendering ─────────────────────────────────────────────────────────
@@ -834,6 +1020,154 @@ function drawTile(
       break;
     }
 
+    case TileType.Asphalt: {
+      ctx.fillStyle = "#2e2f35";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      const aRng = seededRandom(hash);
+      ctx.fillStyle = "#383941";
+      for (let i = 0; i < 3; i++) {
+        ctx.fillRect(sx + Math.floor(aRng() * 14) * s, sy + Math.floor(aRng() * 14) * s, s * 2, s);
+      }
+      const mx = ((worldX % 16) + 16) % 16;
+      const my = ((worldY % 12) + 12) % 12;
+      const onH = my < 2;
+      const onV = mx < 2;
+      // dashed center lines
+      ctx.fillStyle = "#c9a13b";
+      if (onH && !onV && my === 1 && ((worldX % 2) + 2) % 2 === 0) {
+        ctx.fillRect(sx + 3 * s, sy, s * 8, s);
+      }
+      if (onV && !onH && mx === 1 && ((worldY % 2) + 2) % 2 === 0) {
+        ctx.fillRect(sx, sy + 3 * s, s, s * 8);
+      }
+      // crosswalks where roads meet sidewalks
+      ctx.fillStyle = "rgba(230,230,235,0.75)";
+      if (onH && !onV && (mx === 2 || mx === 15)) {
+        for (let i = 0; i < 4; i++) ctx.fillRect(sx + (1 + i * 4) * s, sy + s, s * 2, s * 14);
+      }
+      if (onV && !onH && (my === 2 || my === 11)) {
+        for (let i = 0; i < 4; i++) ctx.fillRect(sx + s, sy + (1 + i * 4) * s, s * 14, s * 2);
+      }
+      break;
+    }
+
+    case TileType.Sidewalk: {
+      ctx.fillStyle = variant < 2 ? "#9c9ca4" : "#94949c";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#7e7e86";
+      ctx.fillRect(sx + 7 * s, sy, s, SCALED_TILE);
+      ctx.fillRect(sx, sy + 7 * s, SCALED_TILE, s);
+      if (variant === 3) {
+        ctx.fillRect(sx + 3 * s, sy + 11 * s, s * 4, s);
+      }
+      break;
+    }
+
+    case TileType.BuildingWall: {
+      const cp = getCityPalette(worldX, worldY);
+      ctx.fillStyle = cp.wall;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = cp.wallDark;
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
+      // two windows, some lit
+      for (let wI = 0; wI < 2; wI++) {
+        const wxp = sx + (wI === 0 ? 3 : 9) * s;
+        ctx.fillStyle = "#141c28";
+        ctx.fillRect(wxp, sy + 4 * s, s * 4, s * 6);
+        const lit = wI === 0 ? (hash & 3) !== 0 : ((hash >> 2) & 3) !== 0;
+        if (lit) {
+          const glow = 0.35 + Math.sin(time * 0.0008 + hash + wI * 3) * 0.1;
+          ctx.fillStyle = `rgba(255, 214, 120, ${glow})`;
+          ctx.fillRect(wxp, sy + 4 * s, s * 4, s * 6);
+        }
+        ctx.fillStyle = cp.wallDark;
+        ctx.fillRect(wxp, sy + 6 * s, s * 4, s);
+      }
+      // neon signs on some ground-floor walls
+      const myB = ((worldY % 12) + 12) % 12;
+      if (myB === 8 && Math.abs(hash) % 5 === 0) {
+        const neon = NEON_COLORS[Math.abs(hash >> 3) % NEON_COLORS.length];
+        const pulse = 0.55 + Math.sin(time * 0.004 + hash) * 0.25;
+        ctx.fillStyle = `rgba(${neon.r},${neon.g},${neon.b},${pulse * 0.35})`;
+        ctx.fillRect(sx, sy + 10 * s, SCALED_TILE, s * 6);
+        ctx.fillStyle = `rgba(${neon.r},${neon.g},${neon.b},${pulse})`;
+        ctx.fillRect(sx + 2 * s, sy + 12 * s, s * 12, s * 2);
+        ctx.fillStyle = "#101018";
+        for (let i = 0; i < 3; i++) ctx.fillRect(sx + (4 + i * 4) * s, sy + 12 * s, s, s * 2);
+      }
+      break;
+    }
+
+    case TileType.BuildingRoof: {
+      ctx.fillStyle = "#3c3e46";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#484a54";
+      ctx.fillRect(sx, sy, SCALED_TILE, s);
+      ctx.fillStyle = "#32343c";
+      for (let ry = 4; ry < 16; ry += 6) ctx.fillRect(sx, sy + ry * s, SCALED_TILE, s);
+      if ((hash & 7) === 0) {
+        // AC unit
+        ctx.fillStyle = "#8a8a92";
+        ctx.fillRect(sx + 5 * s, sy + 5 * s, s * 6, s * 5);
+        ctx.fillStyle = "#5a5a62";
+        ctx.fillRect(sx + 6 * s, sy + 6 * s, s * 4, s * 3);
+        ctx.fillStyle = "#2c2c32";
+        ctx.fillRect(sx + 7 * s, sy + 7 * s, s * 2, s);
+      }
+      break;
+    }
+
+    case TileType.BuildingDoor: {
+      const cp = getCityPalette(worldX, worldY);
+      ctx.fillStyle = cp.wall;
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = cp.wallDark;
+      ctx.fillRect(sx, sy, s, SCALED_TILE);
+      ctx.fillRect(sx + 15 * s, sy, s, SCALED_TILE);
+      // awning
+      ctx.fillStyle = "#7a2a2a";
+      ctx.fillRect(sx + 2 * s, sy + s, s * 12, s * 2);
+      ctx.fillStyle = "#9a3a3a";
+      for (let i = 0; i < 3; i++) ctx.fillRect(sx + (3 + i * 4) * s, sy + s, s * 2, s * 2);
+      // warm light over the door
+      const doorGlow = 0.25 + Math.sin(time * 0.002 + hash) * 0.08;
+      ctx.fillStyle = `rgba(255, 220, 150, ${doorGlow})`;
+      ctx.fillRect(sx + 3 * s, sy + 3 * s, s * 10, s * 3);
+      // glass door
+      ctx.fillStyle = "#4a4a52";
+      ctx.fillRect(sx + 4 * s, sy + 5 * s, s * 8, s * 10);
+      ctx.fillStyle = "#22303e";
+      ctx.fillRect(sx + 5 * s, sy + 6 * s, s * 6, s * 9);
+      ctx.fillStyle = "#3a5a6e";
+      ctx.fillRect(sx + 6 * s, sy + 6 * s, s, s * 9);
+      // threshold
+      ctx.fillStyle = "#84848c";
+      ctx.fillRect(sx + 3 * s, sy + 15 * s, s * 10, s);
+      break;
+    }
+
+    case TileType.StreetLight: {
+      // sidewalk base
+      ctx.fillStyle = "#9c9ca4";
+      ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
+      ctx.fillStyle = "#7e7e86";
+      ctx.fillRect(sx + 7 * s, sy, s, SCALED_TILE);
+      ctx.fillRect(sx, sy + 7 * s, SCALED_TILE, s);
+      // glow
+      const lampGlow = 0.16 + Math.sin(time * 0.002 + hash) * 0.05;
+      ctx.fillStyle = `rgba(255, 240, 190, ${lampGlow})`;
+      ctx.fillRect(sx - 2 * s, sy - 2 * s, s * 14, s * 10);
+      // pole + arm
+      ctx.fillStyle = "#26262c";
+      ctx.fillRect(sx + 9 * s, sy + 3 * s, s * 2, s * 13);
+      ctx.fillRect(sx + 4 * s, sy + 2 * s, s * 7, s);
+      // lamp head
+      ctx.fillStyle = "#eee8c8";
+      ctx.fillRect(sx + 3 * s, sy + 2 * s, s * 3, s * 2);
+      break;
+    }
+
     default:
       ctx.fillStyle = "#333";
       ctx.fillRect(sx, sy, SCALED_TILE, SCALED_TILE);
@@ -1096,6 +1430,79 @@ function drawKoiRipple(
   ctx.beginPath();
   ctx.ellipse(cx, cy, rippleR, rippleR * 0.35, 0, 0, Math.PI * 2);
   ctx.stroke();
+}
+
+function drawCritter(
+  ctx: CanvasRenderingContext2D,
+  sx: number, sy: number,
+  _time: number, frame: number,
+  kind: "panda" | "redpanda",
+  facingLeft: boolean
+) {
+  const s = SCALE;
+  ctx.save();
+  if (facingLeft) {
+    // mirror around the sprite's vertical center line
+    ctx.translate(2 * sx + 16 * s, 0);
+    ctx.scale(-1, 1);
+  }
+  const legOff = frame === 0 ? 0 : s;
+
+  // shadow
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.fillRect(sx + 3 * s, sy + 14 * s, 11 * s, 2 * s);
+
+  if (kind === "panda") {
+    // legs
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 3 * s + legOff, sy + 11 * s, 2 * s, 4 * s);
+    ctx.fillRect(sx + 9 * s - legOff, sy + 11 * s, 2 * s, 4 * s);
+    // body
+    ctx.fillStyle = "#ece8e0";
+    ctx.fillRect(sx + 2 * s, sy + 6 * s, 10 * s, 6 * s);
+    // shoulder band
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 8 * s, sy + 6 * s, 3 * s, 6 * s);
+    // head
+    ctx.fillStyle = "#f2eee6";
+    ctx.fillRect(sx + 9 * s, sy + 2 * s, 6 * s, 6 * s);
+    // ears
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(sx + 9 * s, sy + 1 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 13 * s, sy + 1 * s, 2 * s, 2 * s);
+    // eye patch + nose
+    ctx.fillRect(sx + 12 * s, sy + 4 * s, s, 2 * s);
+    ctx.fillRect(sx + 14 * s, sy + 5 * s, s, s);
+  } else {
+    // ringed tail (behind)
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = i % 2 === 0 ? "#b85c25" : "#e8d8b0";
+      ctx.fillRect(sx + i * s, sy + 5 * s - (i % 2) * s, s, 4 * s);
+    }
+    // legs
+    ctx.fillStyle = "#3a2418";
+    ctx.fillRect(sx + 5 * s + legOff, sy + 11 * s, 2 * s, 4 * s);
+    ctx.fillRect(sx + 10 * s - legOff, sy + 11 * s, 2 * s, 4 * s);
+    // body
+    ctx.fillStyle = "#c96a2a";
+    ctx.fillRect(sx + 4 * s, sy + 6 * s, 8 * s, 6 * s);
+    // dark belly
+    ctx.fillStyle = "#4a2c18";
+    ctx.fillRect(sx + 4 * s, sy + 10 * s, 8 * s, 2 * s);
+    // head
+    ctx.fillStyle = "#d47a35";
+    ctx.fillRect(sx + 10 * s, sy + 3 * s, 6 * s, 5 * s);
+    // white-tipped ears + muzzle
+    ctx.fillStyle = "#e8e0d0";
+    ctx.fillRect(sx + 10 * s, sy + 2 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 14 * s, sy + 2 * s, 2 * s, 2 * s);
+    ctx.fillRect(sx + 13 * s, sy + 5 * s, 3 * s, 2 * s);
+    // eye + nose
+    ctx.fillStyle = "#2a1a10";
+    ctx.fillRect(sx + 12 * s, sy + 4 * s, s, s);
+    ctx.fillRect(sx + 15 * s, sy + 5 * s, s, s);
+  }
+  ctx.restore();
 }
 
 function drawFishingOverlay(
@@ -1662,6 +2069,42 @@ class ZenAudio {
     ripSrc.start(now + 0.05);
   }
 
+  playJump() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(260, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.05, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
+  playChime() {
+    if (!this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+    const freqs = [659.25, 880, 1318.5];
+    freqs.forEach((f, i) => {
+      const osc = this.ctx!.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = f;
+      const g = this.ctx!.createGain();
+      const t = now + i * 0.09;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.07, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+      osc.connect(g);
+      g.connect(this.masterGain!);
+      osc.start(t);
+      osc.stop(t + 0.7);
+    });
+  }
+
   stop() {
     this.isPlaying = false;
     if (this.noteTimeout) clearTimeout(this.noteTimeout);
@@ -1712,11 +2155,38 @@ export default function Game() {
   const koiIdleTimerRef = useRef(0);
   const koiLastSpawnRef = useRef(0);
 
+  // Jump state
+  const jumpRef = useRef({ active: false, start: 0, fromX: 0, fromY: 0, toX: 0, toY: 0 });
+
+  // City state
+  const walkMsRef = useRef(0);
+  const cityModeRef = useRef(false);
+  const lastFrameTimeRef = useRef(0);
+
+  // Toasts / HUD
+  const toastRef = useRef({ text: "", color: "#ffd700", time: 0 });
+  const fishTotalRef = useRef(0);
+  const hintStartRef = useRef(0);
+
+  // Pandas
+  const crittersRef = useRef<Critter[]>([{
+    kind: "redpanda",
+    x: RED_PANDA_HOME.x, y: RED_PANDA_HOME.y,
+    homeX: RED_PANDA_HOME.x, homeY: RED_PANDA_HOME.y,
+    vx: 0, vy: 0, moving: false, stateTimer: 1000,
+    walkAcc: 0, facingLeft: false, blockKey: "",
+  }]);
+  const critterBlocksRef = useRef<Set<string>>(new Set());
+  const critterScanRef = useRef(0);
+  const redPandaFoundRef = useRef(false);
+
   const getChunk = useCallback((cx: number, cy: number): Chunk => {
     const key = `${cx},${cy}`;
     let chunk = chunksRef.current.get(key);
     if (!chunk) {
-      chunk = generateChunk(cx, cy);
+      const isCity = cityModeRef.current &&
+        !(Math.abs(cx) <= VILLAGE_CORE_CHUNKS && Math.abs(cy) <= VILLAGE_CORE_CHUNKS);
+      chunk = generateChunk(cx, cy, isCity);
       chunksRef.current.set(key, chunk);
     }
     return chunk;
@@ -1724,13 +2194,14 @@ export default function Game() {
 
   const isSolid = useCallback(
     (worldX: number, worldY: number): boolean => {
-      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
-      const ov = overlayRef.current.get(key);
+      const tx = Math.floor(worldX);
+      const ty = Math.floor(worldY);
+      const ov = overlayRef.current.get(`${tx},${ty}`);
       if (ov !== undefined) return ov.solid;
-      const cx = Math.floor(worldX / CHUNK_SIZE);
-      const cy = Math.floor(worldY / CHUNK_SIZE);
-      const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-      const ly = ((worldY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const cx = Math.floor(tx / CHUNK_SIZE);
+      const cy = Math.floor(ty / CHUNK_SIZE);
+      const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
       const chunk = getChunk(cx, cy);
       return chunk.solid[ly][lx];
     },
@@ -1739,13 +2210,14 @@ export default function Game() {
 
   const getTileAt = useCallback(
     (worldX: number, worldY: number): TileType => {
-      const key = `${Math.floor(worldX)},${Math.floor(worldY)}`;
-      const ov = overlayRef.current.get(key);
+      const tx = Math.floor(worldX);
+      const ty = Math.floor(worldY);
+      const ov = overlayRef.current.get(`${tx},${ty}`);
       if (ov !== undefined) return ov.type;
-      const cx = Math.floor(worldX / CHUNK_SIZE);
-      const cy = Math.floor(worldY / CHUNK_SIZE);
-      const lx = ((worldX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-      const ly = ((worldY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const cx = Math.floor(tx / CHUNK_SIZE);
+      const cy = Math.floor(ty / CHUNK_SIZE);
+      const lx = ((tx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const ly = ((ty % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
       const chunk = getChunk(cx, cy);
       return chunk.tiles[ly][lx];
     },
@@ -1761,7 +2233,24 @@ export default function Game() {
     await audioRef.current.start();
   }, [started]);
 
-  const CHEATS = [
+  const unlockCity = useCallback(() => {
+    if (cityModeRef.current) return;
+    cityModeRef.current = true;
+    walkMsRef.current = CITY_UNLOCK_MS;
+    toastRef.current = { text: "🌆 the landscape shifts — a city rises ahead...", color: "#9fd6ff", time: performance.now() };
+    audioRef.current?.playChime();
+    // drop cached far-away chunks so newly explored land regenerates as city
+    const pcx = Math.floor(playerRef.current.x / CHUNK_SIZE);
+    const pcy = Math.floor(playerRef.current.y / CHUNK_SIZE);
+    for (const key of Array.from(chunksRef.current.keys())) {
+      const [ccx, ccy] = key.split(",").map(Number);
+      const inCore = Math.abs(ccx) <= VILLAGE_CORE_CHUNKS && Math.abs(ccy) <= VILLAGE_CORE_CHUNKS;
+      const nearPlayer = Math.abs(ccx - pcx) <= 3 && Math.abs(ccy - pcy) <= 3;
+      if (!inCore && !nearPlayer) chunksRef.current.delete(key);
+    }
+  }, []);
+
+  const CHEATS = useMemo(() => [
     {
       label: "teleport to golden bamboo",
       action: () => {
@@ -1778,11 +2267,60 @@ export default function Game() {
         insideHouseRef.current = false;
       },
     },
-  ];
+    {
+      label: "teleport to the red panda",
+      action: () => {
+        playerRef.current.x = RED_PANDA_HOME.x;
+        playerRef.current.y = RED_PANDA_HOME.y + 1;
+        insideHouseRef.current = false;
+      },
+    },
+    {
+      label: "unlock the city (skip the 2:30 walk)",
+      action: () => {
+        playerRef.current.x = 128.5;
+        playerRef.current.y = 8.5;
+        insideHouseRef.current = false;
+        unlockCity();
+      },
+    },
+  ], [unlockCity]);
 
   // Input handling + keyboard start
   useEffect(() => {
     const moveKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "w", "a", "s", "d"]);
+
+    const startJump = () => {
+      const p = playerRef.current;
+      let vx = 0, vy = 0;
+      const k = keysRef.current;
+      if (k.has("ArrowLeft") || k.has("a")) vx -= 1;
+      if (k.has("ArrowRight") || k.has("d")) vx += 1;
+      if (k.has("ArrowUp") || k.has("w")) vy -= 1;
+      if (k.has("ArrowDown") || k.has("s")) vy += 1;
+      if (vx === 0 && vy === 0) {
+        // standing jump goes in the facing direction
+        if (dirRef.current === "left") vx = -1;
+        else if (dirRef.current === "right") vx = 1;
+        else if (dirRef.current === "up") vy = -1;
+        else vy = 1;
+      }
+      const len = Math.hypot(vx, vy);
+      vx /= len; vy /= len;
+      const R = 0.3;
+      const clear = (x: number, y: number) =>
+        !isSolid(x - R, y - R) && !isSolid(x + R, y - R) &&
+        !isSolid(x - R, y + R) && !isSolid(x + R, y + R);
+      // try a full leap, then a short hop, else jump in place
+      let toX = p.x, toY = p.y;
+      for (const d of [JUMP_DIST, 1.0]) {
+        const tx = p.x + vx * d, ty = p.y + vy * d;
+        if (clear(tx, ty)) { toX = tx; toY = ty; break; }
+      }
+      jumpRef.current = { active: true, start: performance.now(), fromX: p.x, fromY: p.y, toX, toY };
+      audioRef.current?.playJump();
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       // Cmd+K / Ctrl+K: toggle cheat palette
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
@@ -1793,9 +2331,10 @@ export default function Game() {
         });
         return;
       }
-      // Escape: close cheat palette
+      // Escape: close cheat palette / cancel fishing
       if (e.key === "Escape") {
         setCheatPaletteOpen(false);
+        if (fishingStateRef.current !== "idle") fishingStateRef.current = "idle";
         return;
       }
       if (cheatPaletteOpen) {
@@ -1819,29 +2358,35 @@ export default function Game() {
         }
         return;
       }
-      keysRef.current.add(e.key);
-      // Movement or Escape cancels fishing
-      if ((moveKeys.has(e.key) || e.key === "Escape") && fishingStateRef.current !== "idle") {
+      // normalize letters so a stuck Shift can't leave "W" behind when "w" is released
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      keysRef.current.add(key);
+      // Movement cancels fishing
+      if (moveKeys.has(key) && fishingStateRef.current !== "idle") {
         fishingStateRef.current = "idle";
       }
       // Start game on movement key press
-      if (moveKeys.has(e.key) && !started) {
+      if (moveKeys.has(key) && !started) {
         startGame();
       }
-      // Spacebar: pick up golden bamboo if nearby
-      if (e.key === " " && started && !hasGoldenBambooRef.current && !insideHouseRef.current) {
+      // Spacebar: pick up golden bamboo if nearby, otherwise jump
+      if (e.key === " " && !e.repeat && started && !insideHouseRef.current) {
+        e.preventDefault();
         const px = playerRef.current.x, py = playerRef.current.y;
-        const dist = Math.abs(px - GOLDEN_BAMBOO_POS.x - 0.5) + Math.abs(py - GOLDEN_BAMBOO_POS.y - 0.5);
-        if (dist < 2) {
+        const bambooDist = Math.abs(px - GOLDEN_BAMBOO_POS.x - 0.5) + Math.abs(py - GOLDEN_BAMBOO_POS.y - 0.5);
+        if (!hasGoldenBambooRef.current && bambooDist < 2) {
           hasGoldenBambooRef.current = true;
           pickupMsgRef.current = performance.now();
           overlayRef.current.delete(`${GOLDEN_BAMBOO_POS.x},${GOLDEN_BAMBOO_POS.y}`);
           revealZoziPath(overlayRef.current);
           zoziRevealedRef.current = true;
+        } else if (!jumpRef.current.active) {
+          if (fishingStateRef.current !== "idle") fishingStateRef.current = "idle";
+          startJump();
         }
       }
       // L key: toggle pulsating on nearby lanterns
-      if ((e.key === "l" || e.key === "L") && started && !insideHouseRef.current) {
+      if (key === "l" && started && !insideHouseRef.current) {
         const px = playerRef.current.x, py = playerRef.current.y;
         const baseTx = Math.floor(px), baseTy = Math.floor(py);
         for (let dy = -2; dy <= 2; dy++) {
@@ -1859,8 +2404,8 @@ export default function Game() {
           }
         }
       }
-      // F key: fishing interaction
-      if ((e.key === "f" || e.key === "F") && started && !insideHouseRef.current) {
+      // F key: fishing interaction (ignore key-repeat so holding F doesn't cancel the wait)
+      if (key === "f" && !e.repeat && started && !insideHouseRef.current && !jumpRef.current.active) {
         const fs = fishingStateRef.current;
         if (fs === "idle") {
           const water = findNearestWater(playerRef.current.x, playerRef.current.y, getTileAt);
@@ -1881,7 +2426,7 @@ export default function Game() {
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      keysRef.current.delete(e.key);
+      keysRef.current.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
     };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -1889,7 +2434,7 @@ export default function Game() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [started, startGame, getTileAt, cheatPaletteOpen, cheatIndex, CHEATS]);
+  }, [started, startGame, getTileAt, isSolid, cheatPaletteOpen, cheatIndex, CHEATS]);
 
   // Title screen canvas animation
   useEffect(() => {
@@ -1999,6 +2544,8 @@ export default function Game() {
       const h = canvas.height;
 
       // ── Update ──
+      const dt = lastFrameTimeRef.current > 0 ? Math.min(time - lastFrameTimeRef.current, 100) : 16.7;
+      lastFrameTimeRef.current = time;
       const keys = keysRef.current;
       let dx = 0;
       let dy = 0;
@@ -2043,7 +2590,23 @@ export default function Game() {
           dirRef.current, frameRef.current, time);
       } else {
         // ── Overworld mode ──
-        if (fishingStateRef.current === "idle") {
+        const jmp = jumpRef.current;
+        if (jmp.active) {
+          // airborne — interpolate along the arc, ignore normal movement
+          const jt = (time - jmp.start) / JUMP_MS;
+          if (jt >= 1) {
+            jmp.active = false;
+            playerRef.current.x = jmp.toX;
+            playerRef.current.y = jmp.toY;
+            const landTile = getTileAt(Math.floor(jmp.toX), Math.floor(jmp.toY));
+            audioRef.current?.playFootstep(isStoneSurface(landTile) ? "stone" : "grass");
+          } else {
+            playerRef.current.x = jmp.fromX + (jmp.toX - jmp.fromX) * jt;
+            playerRef.current.y = jmp.fromY + (jmp.toY - jmp.fromY) * jt;
+            movingRef.current = true;
+          }
+          walkTimerRef.current = 0;
+        } else if (fishingStateRef.current === "idle") {
           // Normal movement — only when not fishing
           if (movingRef.current) {
             if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
@@ -2078,6 +2641,12 @@ export default function Game() {
           frameRef.current = 0;
         }
 
+        // ── Walking clock — enough wandering reveals the city ──
+        if (movingRef.current) {
+          walkMsRef.current += dt;
+          if (!cityModeRef.current && walkMsRef.current >= CITY_UNLOCK_MS) unlockCity();
+        }
+
         // ── Fishing state machine ──
         const fsNow = performance.now();
         const fsDelta = fsNow - fishingStartTimeRef.current;
@@ -2091,12 +2660,15 @@ export default function Game() {
           fishingHoldRef.current = 0;
         } else if (fishingStateRef.current === "bite") {
           // Hold F to reel in — rarer fish need longer hold
-          if (keys.has("f") || keys.has("F")) {
-            fishingHoldRef.current += 16.67; // ~1 frame at 60fps
+          if (keys.has("f")) {
+            fishingHoldRef.current += dt;
             if (fishingHoldRef.current >= fishingCaughtFishRef.current.holdTime) {
               fishingStateRef.current = "caught";
               fishingStartTimeRef.current = fsNow;
+              fishTotalRef.current += 1;
+              toastRef.current = { text: `you caught a ${fishingCaughtFishRef.current.name}!`, color: "#ffe9a0", time: fsNow };
               audioRef.current?.playFishingSplash();
+              audioRef.current?.playChime();
             }
           } else if (fsDelta > 1500) {
             // Missed the bite
@@ -2106,8 +2678,8 @@ export default function Game() {
           fishingStateRef.current = "idle";
         }
 
-        // Check house entry
-        if (zoziRevealedRef.current) {
+        // Check house entry (not while mid-jump — only a grounded step through the door counts)
+        if (zoziRevealedRef.current && !jumpRef.current.active) {
           const pk = `${Math.floor(playerRef.current.x)},${Math.floor(playerRef.current.y)}`;
           if (ZOZI_DOOR_KEYS.has(pk)) {
             savedPosRef.current = { x: playerRef.current.x, y: playerRef.current.y };
@@ -2221,6 +2793,101 @@ export default function Game() {
           koiRef.current = koiRef.current.filter(k => !k.scattering || k.scatterLife > 0);
         }
 
+        // ── Pandas & the red panda ──
+        {
+          const px = playerRef.current.x;
+          const py = playerRef.current.y;
+
+          // spawn scan (throttled): very few pandas, deterministic per block
+          if (time - critterScanRef.current > 500) {
+            critterScanRef.current = time;
+            crittersRef.current = crittersRef.current.filter((c) => {
+              if (c.kind === "redpanda") return true;
+              if (Math.abs(c.x - px) + Math.abs(c.y - py) > 80) {
+                critterBlocksRef.current.delete(c.blockKey);
+                return false;
+              }
+              return true;
+            });
+            let pandaCount = crittersRef.current.filter((c) => c.kind === "panda").length;
+            if (pandaCount < PANDA_MAX) {
+              const bx0 = Math.floor((px - 26) / 16), bx1 = Math.floor((px + 26) / 16);
+              const by0 = Math.floor((py - 18) / 12), by1 = Math.floor((py + 18) / 12);
+              outer:
+              for (let by = by0; by <= by1; by++) {
+                for (let bx = bx0; bx <= bx1; bx++) {
+                  const bKey = `${bx},${by}`;
+                  if (critterBlocksRef.current.has(bKey)) continue;
+                  critterBlocksRef.current.add(bKey);
+                  const bHash = Math.abs(hashCoord(bx * 31 + 7, by * 57 + 11));
+                  if (bHash % 19 !== 0) continue;
+                  const sRng = seededRandom(bHash + 1);
+                  for (let attempt = 0; attempt < 10; attempt++) {
+                    const tx = bx * 16 + 3 + Math.floor(sRng() * 11);
+                    const ty = by * 12 + 3 + Math.floor(sRng() * 7);
+                    const ch = getChunk(Math.floor(tx / CHUNK_SIZE), Math.floor(ty / CHUNK_SIZE));
+                    if (ch.city) break; // no pandas downtown
+                    if (!isSolid(tx, ty)) {
+                      crittersRef.current.push({
+                        kind: "panda", x: tx + 0.5, y: ty + 0.5,
+                        homeX: tx + 0.5, homeY: ty + 0.5,
+                        vx: 0, vy: 0, moving: false,
+                        stateTimer: 400 + sRng() * 1200,
+                        walkAcc: 0, facingLeft: false, blockKey: bKey,
+                      });
+                      pandaCount++;
+                      break;
+                    }
+                  }
+                  if (pandaCount >= PANDA_MAX) break outer;
+                }
+              }
+            }
+          }
+
+          // wander AI
+          for (const c of crittersRef.current) {
+            const cd = Math.abs(c.x - px) + Math.abs(c.y - py);
+            if (cd > 40) continue;
+            c.stateTimer -= dt;
+            if (c.stateTimer <= 0) {
+              if (Math.random() < 0.45) {
+                c.moving = false;
+                c.stateTimer = 900 + Math.random() * 1800;
+              } else {
+                const distHome = Math.hypot(c.x - c.homeX, c.y - c.homeY);
+                const ang = distHome > 4
+                  ? Math.atan2(c.homeY - c.y, c.homeX - c.x) + (Math.random() - 0.5)
+                  : Math.random() * Math.PI * 2;
+                c.vx = Math.cos(ang) * CRITTER_SPEED;
+                c.vy = Math.sin(ang) * CRITTER_SPEED;
+                c.moving = true;
+                c.facingLeft = c.vx < 0;
+                c.stateTimer = 700 + Math.random() * 1300;
+              }
+            }
+            if (c.moving) {
+              const nx = c.x + c.vx * dt;
+              const ny = c.y + c.vy * dt;
+              const R = 0.25;
+              if (!isSolid(nx - R, ny - R) && !isSolid(nx + R, ny - R) &&
+                  !isSolid(nx - R, ny + R) && !isSolid(nx + R, ny + R)) {
+                c.x = nx;
+                c.y = ny;
+                c.walkAcc += dt;
+              } else {
+                c.moving = false;
+                c.stateTimer = 400 + Math.random() * 600;
+              }
+            }
+            if (c.kind === "redpanda" && !redPandaFoundRef.current && cd < 3) {
+              redPandaFoundRef.current = true;
+              toastRef.current = { text: "✨ you found the red panda! ✨", color: "#ffb066", time };
+              audioRef.current?.playChime();
+            }
+          }
+        }
+
         // ── Petals ──
         if (Math.random() < 0.03) {
           petalsRef.current.push({
@@ -2289,10 +2956,29 @@ export default function Game() {
           }
         }
 
-        // character
+        // pandas
+        for (const c of crittersRef.current) {
+          const csx = Math.floor(c.x * SCALED_TILE - camX) - 8 * SCALE;
+          const csy = Math.floor(c.y * SCALED_TILE - camY) - 10 * SCALE;
+          if (csx < -SCALED_TILE * 2 || csx > w + SCALED_TILE ||
+              csy < -SCALED_TILE * 2 || csy > h + SCALED_TILE) continue;
+          const cFrame = c.moving ? Math.floor(c.walkAcc / 160) % 2 : 0;
+          drawCritter(ctx, csx, csy, time, cFrame, c.kind, c.facingLeft);
+        }
+
+        // character (with jump arc + shadow)
         const charScreenX = Math.floor(playerRef.current.x * SCALED_TILE - camX - 8 * SCALE);
         const charScreenY = Math.floor(playerRef.current.y * SCALED_TILE - camY - 8 * SCALE);
-        drawCharacter(ctx, charScreenX, charScreenY, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current, fishingStateRef.current);
+        let jumpLift = 0;
+        if (jumpRef.current.active) {
+          const jt = Math.min((time - jumpRef.current.start) / JUMP_MS, 1);
+          jumpLift = -Math.sin(Math.PI * jt) * 6 * SCALE;
+          ctx.fillStyle = "rgba(0,0,0,0.25)";
+          ctx.beginPath();
+          ctx.ellipse(charScreenX + 8 * SCALE, charScreenY + 15 * SCALE, 5 * SCALE, 2 * SCALE, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        drawCharacter(ctx, charScreenX, charScreenY + jumpLift, dirRef.current, frameRef.current, time, hasGoldenBambooRef.current, fishingStateRef.current);
 
         // fishing overlay
         if (fishingStateRef.current !== "idle") {
@@ -2320,12 +3006,47 @@ export default function Game() {
           ctx.globalAlpha = 1;
         }
 
+        // toast messages (fish caught, red panda, city)
+        const toast = toastRef.current;
+        if (toast.time > 0 && time - toast.time < 3500) {
+          const toastAlpha = Math.max(0, 1 - (time - toast.time) / 3500);
+          ctx.globalAlpha = toastAlpha;
+          ctx.fillStyle = toast.color;
+          ctx.font = "bold 15px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(toast.text, w / 2, 64);
+          ctx.globalAlpha = 1;
+        }
+
         // bamboo indicator when held
         if (hasGoldenBambooRef.current) {
           ctx.fillStyle = "#ffd700";
           ctx.fillRect(w - 30, 10, 6, 20);
           ctx.fillStyle = "#d4a017";
           ctx.fillRect(w - 29, 10, 4, 20);
+        }
+
+        // fish tally
+        if (fishTotalRef.current > 0) {
+          const fhY = hasGoldenBambooRef.current ? 52 : 20;
+          drawPixelFish(ctx, w - 44, fhY, "#7a9bb5", time);
+          ctx.fillStyle = "rgba(255,255,255,0.75)";
+          ctx.font = "12px monospace";
+          ctx.textAlign = "left";
+          ctx.fillText(`× ${fishTotalRef.current}`, w - 28, fhY + 4);
+        }
+
+        // controls hint for the first few seconds
+        if (hintStartRef.current === 0) hintStartRef.current = time;
+        const hintAge = time - hintStartRef.current;
+        if (hintAge < 11000) {
+          const hintAlpha = hintAge < 800 ? hintAge / 800 : hintAge > 9000 ? Math.max(0, 1 - (hintAge - 9000) / 2000) : 1;
+          ctx.globalAlpha = hintAlpha * 0.55;
+          ctx.fillStyle = "#e8e0d0";
+          ctx.font = "12px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("arrows / wasd walk · space jump · f fish near water", w / 2, h - 20);
+          ctx.globalAlpha = 1;
         }
 
         // petals
@@ -2382,7 +3103,7 @@ export default function Game() {
       cancelAnimationFrame(animFrame);
       window.removeEventListener("resize", resize);
     };
-  }, [started, getChunk, isSolid, getTileAt]);
+  }, [started, getChunk, isSolid, getTileAt, unlockCity]);
 
   // Cleanup
   useEffect(() => {
